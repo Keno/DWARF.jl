@@ -15,7 +15,7 @@ module DWARF
     abstract DWARFPUBTableEntry
     abstract DWARFPUBTableSet
 
-    export AbbrevTableEntry, AbbrevTableSet
+    export AbbrevTableEntry, AbbrevTableSet, ULEB128, SLEB128
 
 
     module DWARF32
@@ -143,6 +143,44 @@ module DWARF
         ULEB128(v)
     end
 
+
+    function decode(data::Array{Uint8,1}, offset, ::Type{ULEB128})
+        v = BigInt(0)
+        shift = 0
+        i=0
+        while(true)
+            c = data[offset+i]
+            i+=1
+            v |= BigInt(c&0x7f)<<shift
+            if (c&0x80)==0 #is last bit
+                break
+            end
+            shift+=7
+        end
+        (offset+i,ULEB128(v))
+    end
+
+    function decode(data::Array{Uint8,1}, offset, ::Type{SLEB128})
+        v = BigInt(0)
+        shift = 0
+        c=0
+        i=0
+        while(true)
+            c = data[offset+i]
+            i+=1
+            v |= BigInt(c&0x7f)<<shift
+            if (c&0x80)==0 #is last bit
+                break
+            end
+            shift+=7
+        end
+        if (c & 0x40) != 0
+            v |= -(BigInt(1)<<shift)
+        end
+
+        (offset+i,SLEB128(v))
+    end
+
     function read(io::IO, ::Type{SLEB128})
         v = BigInt(0)
         shift = 0
@@ -162,11 +200,14 @@ module DWARF
         SLEB128(v)
     end
 
+    fix_endian(x,endianness) = StrPack.endianness_converters[endianness][2](x)
+
     # Attributes
     module Attributes
         import DWARF
         import DWARF.ULEB128
         import DWARF.SLEB128
+        import DWARF.fix_endian
 
         import Base.isequal, Base.read
         export AttributeSpecification, Attribute, GenericStringAttribute,
@@ -433,8 +474,6 @@ module DWARF
             #end
         end
 
-        fix_endian(x,endianness) = StrPack.endianness_converters[endianness][2](x)
-
         read(io::IO,name,::Type{UConstant}) = UConstant(name,read(io,ULEB128))
         read(io::IO,name,::Type{SConstant}) = SConstant(name,read(io,SLEB128))
         read(io::IO,name,::Type{UReference}) = UReference(name,read(io,ULEB128))
@@ -498,8 +537,181 @@ module DWARF
 
     module Expressions
         # TODO
-    end
+        using DWARF
+        import DWARF.fix_endian
 
+        type StateMachine{T}
+            stack::Array{T,1}
+        end
+
+        function evaluate_generic_instruction{T}(s::StateMachine{T},opcodes,i,getreg_func::Function,getword_func,endianness::Symbol)
+            opcode = opcodes[i]
+            i+=1
+            if opcode == DWARF.DW_OP_deref
+                push!(s.stack,getword_func(pop!(s.stack)))
+            elseif opcode == DWARF.DW_OP_addr
+                println(i:(i+sizeof(T)-1))
+                push!(s.stack,fix_endian(reinterpret(T,opcodes[i:(i+sizeof(T)-1)])[1],endianness))
+                i+=sizeof(T)-1
+            elseif opcode == DWARF.DW_OP_const1u
+                i+=1
+                push!(s.stack,convert(T,opcodes[i]))
+            elseif opcode == DWARF.DW_OP_const1s
+                i+=1 
+                # Yes, this is actually different from the above, since we need to sign extend properly
+                push!(s.stack,convert(T,fix_endian(reinterpret(Int8,opcodes[i]),endianness)))
+            elseif opcode == DWARF.DW_OP_const2u # 1 2-byte constant 
+                push!(s.stack,convert(T,fix_endian(reinterpret(Uint16,opcodes[i:i+1])[1],endianness)))
+                i+=2
+            elseif opcode == DWARF.DW_OP_const2s # 1 2-byte constant 
+                push!(s.stack,convert(T,fix_endian(reinterpret(Int16,opcodes[i:i+1])[1],endianness)))
+                i+=2
+            elseif opcode == DWARF.DW_OP_const4u # 1 4-byte constant 
+                push!(s.stack,convert(T,fix_endian(reinterpret(Uint32,opcodes[i:i+3])[1],endianness)))
+                i+=4
+            elseif opcode == DWARF.DW_OP_const4u # 1 4-byte constant 
+                push!(s.stack,convert(T,fix_endian(reinterpret(Int32,opcodes[i:i+3])[1],endianness)))
+                i+=4
+            elseif opcode == DWARF.DW_OP_const8u # 1 8-byte constant 
+                push(!s.stack,convert(T,fix_endian(reinterpret(Uint64,opcodes[i:i+7])[1],endianness)))
+                i+=8  
+            elseif opcode == DWARF.DW_OP_const8s # 1 8-byte constant 
+                push!(s.stack,convert(T,fix_endian(reinterpret(Int64,opcodes[i:i+7])[1],endianness)))
+                i+=8   
+            elseif opcode == DWARF.DW_OP_constu 
+                (i,val) = decode(opcodes,i,ULEB128)
+                push!(s.stack,convert(T,val))
+            elseif opcode == DWARF.DW_OP_consts
+                (i,val) = decode(opcodes,i,SLEB128)  
+                push!(s.stack,convert(T,val))
+            elseif opcode == DWARF.DW_OP_dup 
+                push!(s.stack,s.stack[length(s.stack)-1])
+            elseif opcode == DWARF.DW_OP_pick
+                push!(s.stack,s.stack[opcode[i+=1]])
+            elseif opcode == DWARF.DW_OP_swap
+                top = length(s.stack)
+                val = s.stack[top]
+                s.stack[top] = s.stack[top-1]
+                s.stack[top-1] = val
+            elseif opcode == DWARF.DW_OP_rot
+                top = length(s.stack)
+                val = s.stack[top]
+                s.stack[top] = s.stack[top-1]
+                s.stack[top-1] = s.stack[top-2]
+                s.stack[top-2] = val
+            elseif opcode == DWARF.DW_OP_xderef
+                error("Unimplemented")
+            elseif opcode == DWARF.DW_OP_abs
+                push!(s.stack,abs(signed(pop!(s.stack))))
+            elseif opcode == DWARF.DW_OP_and
+                push!(s.stack,pop!(s.stack)&pop!(s.stack))
+            elseif opcode == DWARF.DW_OP_div
+                top = pop!(s.stack)
+                push!(s.stack,pop!(s.stack)/top)
+            elseif opcode == DWARF.DW_OP_minus
+                top = pop!(s.stack)
+                push!(s.stack,pop!(s.stack)-top)
+            elseif opcode == DWARF.DW_OP_minus
+                top = pop!(s.stack)
+                push!(s.stack,pop!(s.stack)%top)
+            elseif opcode == DWARF.DW_OP_mul
+                push!(s.stack,pop!(s.stack)*pop!(s.stack))
+            elseif opcode == DWARF.DW_OP_neg
+                push!(s.stack,-(signed(pop!(s.stack))))
+            elseif opcode == DWARF.DW_OP_not
+                push!(s.stack,~(pop!(s.stack)))
+            elseif opcode == DWARF.DW_OP_plus_uconst
+                (i,val) = decode(opcodes,i,ULEB128)
+                push!(s.stack,pop!(s.stack)+val)
+            elseif opcode == DWARF.DW_OP_shl
+                top = pop!(s.stack)
+                push!(s.stack,pop!(s.stack)<<top)  
+            elseif opcode == DWARF.DW_OP_shr
+                top = pop!(s.stack)
+                push!(s.stack,pop!(s.stack)>>top)  
+            elseif opcode == DWARF.DW_OP_shra
+                top = pop!(s.stack)
+                push!(s.stack,convert(T,signed(pop!(s.stack))>>top))   
+            elseif opcode == DWARF.DW_OP_xor
+                top = pop!(s.stack)
+                push!(s.stack,pop!(s.stack)$top)  
+            elseif opcode == DWARF.DW_OP_le
+                top = pop!(s.stack)
+                push!(s.stack,convert(T,pop!(s.stack)<=top))
+            elseif opcode == DWARF.DW_OP_ge
+                top = pop!(s.stack)
+                push!(s.stack,convert(T,pop!(s.stack)>=top))
+            elseif opcode == DWARF.DW_OP_eq
+                top = pop!(s.stack)
+                push!(s.stack,convert(T,pop!(s.stack)==top))
+            elseif opcode == DWARF.DW_OP_lt
+                top = pop!(s.stack)
+                push!(s.stack,convert(T,pop!(s.stack)<top))
+            elseif opcode == DWARF.DW_OP_gt
+                top = pop!(s.stack)
+                push!(s.stack,convert(T,pop!(s.stack)>top))
+            elseif opcode == DWARF.DW_OP_ne
+                top = pop!(s.stack)
+                push!(s.stack,convert(T,pop!(s.stack)!=top))
+            elseif opcode == DWARF.DW_OP_skip
+                i += fix_endian(reinterrept(Int16,opcodes[i:i+1])[1],endianness)
+            elseif opcode == DWARF.DW_OP_bra
+                if(pop!(s.stack) != 0)
+                    i += fix_endian(reinterrept(Int16,opcodes[i:i+1])[1],endianness)
+                end
+            elseif opcode == DWARF.DW_OP_call2 || opcode == DWARF.DW_OP_call4 || opcode == DWARF.DW_OP_call_ref
+                error("Unimplemented")
+            elseif opcode >= DWARF.DW_OP_lit1 && opcode <= DWARF.DW_OP_lit31
+                push!(s.stack,opcode-DW_OP_lit1+1)
+            elseif opcode >= DWARF.DW_OP_breg0 && opcode <= DWARF.DW_OP_breg31
+                push!(s.stack,getreg_func(opcode-DWARF.DW_OP_breg0))
+            elseif opcode == DWARF.DW_OP_bregx
+                (i,val) = decode(opcodes,i,ULEB128)
+                push!(s.stack,getreg_func(val))
+            elseif opcode == DWARF.DW_OP_nop
+                #NOP
+            else 
+                return (i-1,false)
+            end
+            (i,true)
+        end
+
+        function evaluate_generic{T}(s::StateMachine{T},opcodes::Array{Uint8,1},getreg_func::Function,getword_func,endianness::Symbol)
+            i=1
+            while true
+                i,res = evaluate_generic_instruction(s,opcodes,i,getreg_func,getword_func,endianness)
+                if !res
+                    error("Unrecognized Opcode ",opcodes[i])
+                end
+                if i==length(opcodes)
+                    break
+                end
+            end
+        end
+
+        immutable RegisterLocation
+            i::Int32
+        end
+
+        immutable MemoryLocation{T}
+            i::T
+        end
+
+        function evaluate_simple_location{T}(s::StateMachine{T},opcodes::Array{Uint8,1},getreg_func::Function,getword_func,endianness::Symbol)
+            i=1
+            opcode = opcodes[i]
+            if opcode >= DWARF.DW_OP_reg0 && opcode <= DWARF.DW_OP_reg31
+                return RegisterLocation(opcode-DWARF.DW_OP_reg0)
+            elseif opcode == DWARF.DW_OP_regx
+                (i,val) = decode(opcodes,i,ULEB128)
+                return RegisterLocation(val)
+            else
+                evaluate_generic(s,opcodes,getreg_func,getword_func,endianness)
+                println(s.stack)
+                return MemoryLocation{T}(last(s.stack))
+            end
+        end
+    end
 
     zero(::Type{AttributeSpecification}) = AttributeSpecification(ULEB128(BigInt(0)),ULEB128(BigInt(0)))
 
