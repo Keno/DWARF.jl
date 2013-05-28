@@ -274,7 +274,7 @@ module DWARF
         abstract StrTableReference
         module DWARF32
             import DWARF.ULEB128
-            using Attributes
+            using ..Attributes
             immutable StrTableReference <: GenericStringAttribute
                 name::ULEB128
                 content::Uint32
@@ -283,7 +283,7 @@ module DWARF
 
         module DWARF64
             import DWARF.ULEB128
-            using Attributes
+            using ..Attributes
             immutable StrTableReference <: GenericStringAttribute
                 name::ULEB128
                 content::Uint64
@@ -332,7 +332,6 @@ module DWARF
             if mapping == UnimplementedAttribute
                 error("Unimplemented Attribute Form $form")
             end
-            println(form)
             mapping
         end
 
@@ -527,13 +526,12 @@ module DWARF
         end
 
         function read(io::IO,header::DWARF.DWARFCUHeader,a::AttributeSpecification,endianness::Symbol)
-            println(a)
             generic = specialize(read(io,form2gattrT(a.form),header,a.name,a.form,endianness))
             # TODO: Return Actual Attributes
             generic
         end
     end
-    using Attributes
+    using .Attributes
 
     module Expressions
         # TODO
@@ -550,7 +548,6 @@ module DWARF
             if opcode == DWARF.DW_OP_deref
                 push!(s.stack,getword_func(pop!(s.stack)))
             elseif opcode == DWARF.DW_OP_addr
-                println(i:(i+sizeof(T)-1))
                 push!(s.stack,fix_endian(reinterpret(T,opcodes[i:(i+sizeof(T)-1)])[1],endianness))
                 i+=sizeof(T)-1
             elseif opcode == DWARF.DW_OP_const1u
@@ -707,7 +704,6 @@ module DWARF
                 return RegisterLocation(val)
             else
                 evaluate_generic(s,opcodes,getreg_func,getword_func,endianness)
-                println(s.stack)
                 return MemoryLocation{T}(last(s.stack))
             end
         end
@@ -812,7 +808,7 @@ module DWARF
         entry_size = StrPack.calcsize(t,dummy_dict,align_packed)
         while true
             skip(io,position(io)%entry_size) # Align to a boundary that is a multiple of the entry size
-            r = unpack(io,t,dummy_dict,align_packed,endianness)
+            r = unpack(io,t,dummy_dict,align_packed,endianness,true)
             if r==zero(t)
                 break 
             end
@@ -993,7 +989,6 @@ module DWARF
 
     function read(io,header::DWARFCUHeader,ats::AbbrevTableSet,parent::Union(DIETree,DIETreeNode),::Type{DIETreeNode},endianness::Symbol)
         num = read(io,ULEB128)
-        println(num)
         if num != 0
             ae = ats.entries[num.val]
             ret = DIETreeNode(read(io,num,header,ae,DIE,endianness),Array(DIETreeNode,0),parent)
