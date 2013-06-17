@@ -483,7 +483,7 @@ module DWARF
             t = T(name,fix_endian(read(io,typeof(t.content)),endianness))
             t
         end
-        read(io::IO,name,T::Type{StringAttribute}) = StringAttribute(name,strip(readuntil(io,'\0'),"\0"))
+        read(io::IO,name,T::Type{StringAttribute}) = StringAttribute(name,strip(readuntil(io,'\0'),'\0'))
         read{T<:GenericAttribute}(io::IO,::Type{T},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol) = read(io,name,T)
         function read(io::IO,::Type{BlockAttribute},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
             if form == DWARF.DW_FORM_block1
@@ -834,7 +834,7 @@ module DWARF
     function read{T<:DWARFPUBTableEntry}(io::IO,::Type{T},endianness::Symbol)
         offset = StrPack.endianness_converters[endianness][2](read(io,T.types[1]))
         if offset != 0
-            name = strip(readuntil(io,'\0'),"\0")
+            name = strip(readuntil(io,'\0'),'\0')
         else
             name = ""
         end
