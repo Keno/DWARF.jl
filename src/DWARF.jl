@@ -4,7 +4,7 @@ module DWARF
 
     include("constants.jl")
 
-    import Base.read, Base.zero, Base.bswap, Base.isequal, Base.show, Base.print, Base.show_indented
+    import Base: read, write, zero, bswap, isequal, show, print, show_indented
 
 
     abstract DWARFHeader
@@ -117,6 +117,9 @@ module DWARF
     ### LEB 128 types
     abstract LEB128
 
+    Base.convert{T<:LEB128}(::Type{T},x::Int64) = T(big(x))
+    Base.convert{T<:LEB128}(::Type{BigInt},x::T) = x.val
+
     immutable ULEB128 <: LEB128
         val::BigInt
     end
@@ -132,7 +135,7 @@ module DWARF
     function read(io::IO, ::Type{ULEB128})
         v = BigInt(0)
         shift = 0
-        while(true)
+        while true
             c = read(io,Uint8)
             v |= BigInt(c&0x7f)<<shift
             if (c&0x80)==0 #is last bit
@@ -143,6 +146,19 @@ module DWARF
         ULEB128(v)
     end
 
+
+    function write(io::IO, x::ULEB128)
+        x = x.val
+        while true
+            v = uint8(x) & 0x7f
+            x >>= 7
+            if x != 0
+                v |= 0x80 # = ~0x7f
+            end
+            write(io,v) 
+            x == 0 && break
+        end
+    end
 
     function decode(data::Array{Uint8,1}, offset, ::Type{ULEB128})
         v = BigInt(0)
@@ -198,6 +214,21 @@ module DWARF
         end
 
         SLEB128(v)
+    end
+
+    function write(io::IO, x::SLEB128)
+        x = x.val
+        more = true
+        while more
+            v = uint8(x) & 0x7f
+            x >>= 7
+            if ((x == 0 && ((v & 0x40) == 0)) || (x == -1 && ((v & 0x40) > 0)))
+                more = false
+            else
+                v |= 0x80
+            end
+            write(io,v)
+        end
     end
 
     fix_endian(x,endianness) = StrPack.endianness_converters[endianness][2](x)
@@ -709,6 +740,317 @@ module DWARF
         end
     end
 
+    # The line table is encoded as a state machine program 
+    # operating on a register machine, whose register represent the
+    # values the debugger needs to know about the current source location
+    module LineTableSupport
+        using StrPack
+
+        import ..ULEB128, ..SLEB128, ..DWARF
+
+        immutable HeaderStub{T}
+            length::T
+            version::Uint16
+            header_length::T
+            minimum_instruction_length::Uint8
+            maximum_operations_per_instruction::Uint8
+            default_is_stmt::Uint8
+            line_base::Int8
+            line_range::Int8
+            opcode_base::Uint8
+        end
+
+        immutable FileEntry
+            name::UTF8String
+            dir_idx::BigInt
+            timestamp::BigInt
+            filelength::BigInt
+        end
+
+        Base.isequal(x::FileEntry,y::FileEntry) = 
+            (x.name == y.name && x.dir_idx == y.dir_idx && x.timestamp == y.timestamp && x.filelength == y.filelength)
+
+        function Base.read(io::IO,::Type{FileEntry})
+            s = readstring(io)
+            if endof(s) == 0
+                return FileEntry(s,0,0,0)
+            end
+            return FileEntry(s,read(io,ULEB128),read(io,ULEB128),read(io,ULEB128))
+        end
+
+        function unpack(io,::Type{HeaderStub}) 
+            T = Uint32
+            length = read(io,T)
+            if length == 0xffffffff
+                T = Uint64
+                length = read(io,T)
+            end
+            version = read(io,Uint16)
+            header_length = read(io,T)
+            minimum_instruction_length = read(io,Uint8)
+            maximum_operations_per_instruction = version >= 4 ? read(io,Uint8) : 1
+            HeaderStub{T}(length,version,header_length,minimum_instruction_length,maximum_operations_per_instruction,
+                read(io,Uint8),read(io,Int8),read(io,Int8),read(io,Uint8))
+        end
+
+        immutable Header{T}
+            stub::HeaderStub{T}
+            standard_opcode_lengths::Vector{Uint8}
+            include_directories::Vector{UTF8String}
+            file_names::Vector{FileEntry}
+        end
+
+        function readstring(io)
+            ret = Array(Uint8,0)
+            while true
+                c = read(io,Uint8)
+                c == 0 && break
+                push!(ret,c)
+            end
+            UTF8String(ret)
+        end
+
+        function read_header(io)
+            stub = unpack(io,HeaderStub)
+            standard_opcode_lengths = Array(Uint8,stub.opcode_base-1)
+            read(io,standard_opcode_lengths)
+            include_directories = UTF8String[]
+            while true
+                s = readstring(io)
+                endof(s) == 0 && break
+                push!(include_directories,s)
+            end
+            file_names = FileEntry[]
+            while true
+                f = read(io,FileEntry)
+                endof(f.name) == 0 && break
+                push!(file_names,f)
+            end
+            Header{header_type(stub)}(stub,standard_opcode_lengths,include_directories,file_names)
+        end
+
+        header_type{T}(h::Header{T}) = T
+        header_type{T}(h::HeaderStub{T}) = T
+
+        immutable RegisterState
+            address::BigInt
+            op_index::BigInt
+            file::BigInt
+            line::BigInt
+            column::BigInt
+            is_stmt::Bool
+            basic_block::Bool
+            end_sequence::Bool
+            prologue_end::Bool
+            epilogue_begin::Bool
+            isa::BigInt
+            discriminator::BigInt
+
+            # Initial Register state as defined by DWARF standard
+            function RegisterState(default_is_stmt::Bool)
+                new(BigInt(0),BigInt(0),BigInt(1),BigInt(1),BigInt(0),default_is_stmt,
+                    false,false,false,false,BigInt(0),BigInt(0))
+            end
+
+            function RegisterState(x::RegisterState;
+                    address = x.address, op_index = x.op_index, file = x.file, line = x.line,
+                    column = x.column, is_stmt = x.is_stmt, basic_block = x.basic_block,
+                    end_sequence = x.end_sequence, prologue_end = x.prologue_end, 
+                    epilogue_begin = x.epilogue_begin, isa = x.isa, discriminator = x.discriminator)
+                new(address,op_index,file,line,column,is_stmt,basic_block,end_sequence,prologue_end,
+                    epilogue_begin,isa,discriminator)
+            end
+
+            RegisterState(address,op_index,file,line,column,is_stmt,basic_block,end_sequence,
+                    prologue_end,epilogue_begin,isa,discriminator) =
+                new(address,op_index,file,line,column,is_stmt,basic_block,end_sequence,
+                    prologue_end,epilogue_begin,isa,discriminator)
+        end
+
+        Base.isequal(x::RegisterState,y::RegisterState) = (
+            x.address == y.address &&
+            x.op_index == y.op_index &&
+            x.file == y.file &&
+            x.line == y.line &&
+            x.column == y.column &&
+            x.is_stmt == y.is_stmt &&
+            x.basic_block == y.basic_block &&
+            x.end_sequence == y.end_sequence &&
+            x.prologue_end == y.prologue_end &&
+            x.epilogue_begin == y.epilogue_begin &&
+            x.isa == y.isa &&
+            x.discriminator == y.discriminator)
+
+        type StateMachine
+            header::Header
+            state::RegisterState
+        end
+
+        function pc_adv!(m::StateMachine,op_adv)
+            m.state = RegisterState(m.state,
+                address = m.state.address + m.header.stub.minimum_instruction_length *
+                    div(m.state.op_index + op_adv,m.header.stub.maximum_operations_per_instruction),
+                op_index = m.state.op_index + 
+                    mod(m.state.op_index + op_adv,m.header.stub.maximum_operations_per_instruction))
+        end
+
+        function pcl_adv!(m::StateMachine,op)
+            adj_opc = op - m.header.stub.opcode_base
+            pc_adv!(m,div(adj_opc,m.header.stub.line_range))
+            m.state = RegisterState(m.state,
+                line = m.state.line + m.header.stub.line_base + mod(adj_opc,m.header.stub.line_range))
+        end
+
+        function step(io,m::StateMachine)
+            op = read(io,Uint8)
+            if op == 0
+                # Extended opcode
+                pos = position(io)
+                size::BigInt = read(io,ULEB128)
+                ex_op = read(io,Uint8)
+                if ex_op == DWARF.DW_LNE_end_sequence
+                    m.state = RegisterState(m.state,end_sequence = true)
+                    ret = (true,m.state) 
+                    m.state = RegisterState(m.header.stub.default_is_stmt > 0)
+                    position(io) > pos+size+1 && error("Malformed extended instruction")
+                    return ret
+                elseif ex_op == DWARF.DW_LNE_set_address
+                    addrsize = pos+size - position(io) + 1
+                    if addrsize == 4
+                        m.state = RegisterState(m.state,address = read(io,Uint32))
+                    elseif addrsize == 8
+                        m.state = RegisterState(m.state,address = read(io,Uint64))
+                    else
+                        error("Unsupported target address size $addrsize")
+                    end
+                elseif ex_op == DWARF.DW_LNE_define_file
+                    push!(m.file_names,read(io,FileEntry))
+                elseif ex_op == DWARF.DW_LNE_set_discriminator
+                    m.state = RegisterState(m.state,discriminator = read(io,ULEB128))
+                else 
+                    error("Unrecognized extended opcode $ex_op")
+                end
+                position(io) > pos+size+1 && error("Malformed extended instruction (op=$ex_op, pos=$pos, size=$size, iopos=$(position(io)))")
+            elseif op < m.header.stub.opcode_base
+                # standard opcode
+                if op == DWARF.DW_LNS_copy
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_copy] != 0
+                        error("Malformed Instruction")
+                    end
+                    ret = (true,m.state)
+                    m.state = RegisterState(m.state,
+                        discriminator = 0,
+                        basic_block = false,
+                        prologue_end = false,
+                        epilogue_begin = false)
+                    return ret
+                elseif op == DWARF.DW_LNS_advance_pc
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_advance_pc] != 1
+                        error("Malformed Instruction")
+                    end
+                    pc_adv!(m,read(io,ULEB128).val)
+                elseif op == DWARF.DW_LNS_advance_line
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_advance_line] != 1
+                        error("Malformed Instruction")
+                    end
+                    m.state = RegisterState(m.state,line = m.state.line + read(io,SLEB128).val)
+                elseif op == DWARF.DW_LNS_set_file
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_file] != 1
+                        error("Malformed Instruction")
+                    end
+                    m.state = RegisterState(m.state,line = read(io,ULEB128))
+                elseif op == DWARF.DW_LNS_set_column
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_column] != 1
+                        error("Malformed Instruction")
+                    end
+                    m.state = RegisterState(m.state,column = read(io,ULEB128))
+                elseif op == DWARF.DW_LNS_negate_stmt
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_negate_stmt] != 0
+                        error("Malformed Instruction")             
+                    end
+                    m.state = RegisterState(m.state,is_stmt = !m.state.is_stmt)
+                elseif op == DWARF.DW_LNS_set_basic_block
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_basic_block] != 0
+                        error("Malformed Instruction")             
+                    end
+                    m.state = RegisterState(m.state,basic_block = true)
+                elseif op == DWARF.DW_LNS_const_add_pc
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_const_add_pc] != 0
+                        error("Malformed Instruction")             
+                    end
+                    pc_adv!(m,255)
+                elseif op == DWARF.DW_LNS_fixed_advance_pc
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_fixed_advance_pc] != 1
+                        error("Malformed Instruction")             
+                    end   
+                    m.state = RegisterState(m.state,
+                        address = m.state.address + read(io,Uint16),
+                        op_index = 0)
+                elseif op == DWARF.DW_LNS_set_prologue_end
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_prologue_end] != 0
+                        error("Malformed Instruction")             
+                    end 
+                    m.state = RegisterState(m.state, prologue_end = false)
+                elseif op == DWARF.DW_LNS_set_epilogue_begin
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_epilogue_begin] != 0
+                        error("Malformed Instruction")             
+                    end 
+                    m.state = RegisterState(m.state, epilogue_begin = false)
+                elseif op == DWARF.DW_LNS_set_epilogue_begin
+                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_epilogue_begin] != 0
+                        error("Malformed Instruction")             
+                    end 
+                    m.state = RegisterState(m.state, isa = read(io,ULEB128))
+                end
+            else 
+                # special opcode
+                # standard actions
+                m.state = RegisterState(m.state,
+                    basic_block = false,
+                    prologue_end = false,
+                    epilogue_begin = false,
+                    discriminator = 0)
+                # decode the opcode
+                pc_adv!(m,op)
+            end
+            return (false,m.state)
+        end
+
+        function state_step(io,m::StateMachine)
+            stop = false
+            state = m.state
+            while !stop
+                (stop, state) = step(io,m)
+            end
+            return state
+        end
+
+        # Iterate over the line table
+        immutable LineTable
+            io::IO
+            header::Header
+            start::Int
+            LineTable(io,header,start) = new(io,header,start)
+            LineTable(io) = (pos=position(io);new(io,read_header(io),pos))
+        end
+
+        import Base: start, next, done
+
+        function start(x::LineTable) 
+            # The header length is the number of bytes after the header length
+            # The fields from the start are length (header_type), version (Uint16) and header_length(header_type)
+            # plus an additional Uint32 if the header_type is Uint64
+            seek(x.io,x.start + x.header.stub.header_length + 2*sizeof(header_type(x.header)) + sizeof(Uint16) +
+                (header_type(x.header) == Uint64 ? sizeof(Uint32) : 0))
+            StateMachine(x.header,RegisterState(x.header.stub.default_is_stmt > 0))
+        end
+        next(x::LineTable,m::StateMachine) = (state_step(x.io,m),m)
+        done(x::LineTable,m::StateMachine) = position(x.io) > (x.start + x.header.stub.length)
+    end
+
+    import .LineTableSupport.LineTable
+    export LineTable
+
     zero(::Type{AttributeSpecification}) = AttributeSpecification(ULEB128(BigInt(0)),ULEB128(BigInt(0)))
 
     immutable DIE
@@ -816,7 +1158,7 @@ module DWARF
         end
         table
     end
-    read(io,::Type{ARTableSet}) = read(io,ARTableSet,:NativeEndian)
+    read(io::IO,::Type{ARTableSet}) = read(io,ARTableSet,:NativeEndian)
     function read(io,f::ELF.ELFFile,h::ELF.ELFSectionHeader,::Type{ARTable})
         seek(io,h.sh_offset)
         ret = ARTable(Array(ARTableSet,0))
@@ -857,7 +1199,7 @@ module DWARF
         end
         t
     end
-    read(io,::Type{DWARFPUBTableSet}) = read(io,DWARFPUBTableSet,:NativeEndian)
+    read(io::IO,::Type{DWARFPUBTableSet}) = read(io,DWARFPUBTableSet,:NativeEndian)
     function read(io,f::ELF.ELFFile,h::ELF.ELFSectionHeader,::Type{PUBTable})
         seek(io,h.sh_offset)
         ret = PUBTable(Array(DWARFPUBTableSet,0))
@@ -910,43 +1252,43 @@ module DWARF
         ret
     end
 
-    function read(io,f::ELF.ELFFile,h::ELF.ELFSectionHeader,::Type{AbbrevTableSet})
+    function read(io::IO,f::ELF.ELFFile,h::ELF.ELFSectionHeader,::Type{AbbrevTableSet})
         seek(io,h.sh_offset)
         read(io,AbbrevTableSet,f.endianness)
     end
 
-    function read(io,f::ELF.ELFFile,h::ELF.ELFSectionHeader,s::DWARFPUBTableSet,::Type{DWARFCUHeader})
+    function read(io::IO,f::ELF.ELFFile,h::ELF.ELFSectionHeader,s::DWARFPUBTableSet,::Type{DWARFCUHeader})
         seek(io,h.sh_offset+s.header.debug_info_offset)
         read(io,DWARFCUHeader,f.endianness)
     end
 
     # Assume position is right after number
-    function read(io,num::ULEB128,header::DWARFCUHeader,ate::AbbrevTableEntry,::Type{DIE},endianness::Symbol)
+    function read(io::IO,num::ULEB128,header::DWARFCUHeader,ate::AbbrevTableEntry,::Type{DIE},endianness::Symbol)
         ret = DIE(num,Array(Attribute,0))
         for a in ate.attributes
             push!(ret.attributes,read(io,header,a,endianness))
         end
         ret
     end
-    function read(io,header::DWARFCUHeader,ats::AbbrevTableSet,::Type{DIE})
+    function read(io::IO,header::DWARFCUHeader,ats::AbbrevTableSet,::Type{DIE})
         num = read(io,ULEB128)
         ae = ats.entries[num.val]
         read(io,num,header,ae,DIE)
     end
 
-    function read(io,f::ELF.ELFFile,debug_info::ELF.ELFSectionHeader,debug_abbrev::ELF.ELFSectionHeader,
+    function read(io::IO,f::ELF.ELFFile,debug_info::ELF.ELFSectionHeader,debug_abbrev::ELF.ELFSectionHeader,
         s::DWARFPUBTableSet,e::DWARFPUBTableEntry,header::DWARFCUHeader,::Type{DIE})
         ats = read(io,f,debug_abbrev,header,DWARF.AbbrevTableSet)
         seek(io,debug_info.sh_offset+s.header.debug_info_offset+e.offset)
         read(io,header,ats,DIE)
     end
 
-    function read(io,f::ELF.ELFFile,h::ELF.ELFSectionHeader,s::DWARFCUHeader,::Type{AbbrevTableSet})
+    function read(io::IO,f::ELF.ELFFile,h::ELF.ELFSectionHeader,s::DWARFCUHeader,::Type{AbbrevTableSet})
         seek(io,h.sh_offset+s.debug_abbrev_offset)
         read(io,AbbrevTableSet,f.endianness)
     end
 
-    function read(io,::Type{DIE},endianness::Symbol)
+    function read(io::IO,::Type{DIE},endianness::Symbol)
         tag = read(io,ULEB128)
         DIE(tag,Array(AttributeSpecification,0))
     end
@@ -987,7 +1329,7 @@ module DWARF
 
     zero(::Type{DIETreeNode}) = zero_node
 
-    function read(io,header::DWARFCUHeader,ats::AbbrevTableSet,parent::Union(DIETree,DIETreeNode),::Type{DIETreeNode},endianness::Symbol)
+    function read(io::IO,header::DWARFCUHeader,ats::AbbrevTableSet,parent::Union(DIETree,DIETreeNode),::Type{DIETreeNode},endianness::Symbol)
         num = read(io,ULEB128)
         if num != 0
             ae = ats.entries[num.val]
@@ -1003,7 +1345,7 @@ module DWARF
         zero(DIETreeNode)
     end
 
-    function read(io,f::ELF.ELFFile,debug_info::ELF.ELFSectionHeader,debug_abbrev::ELF.ELFSectionHeader,
+    function read(io::IO,f::ELF.ELFFile,debug_info::ELF.ELFSectionHeader,debug_abbrev::ELF.ELFSectionHeader,
         s::DWARFPUBTableSet,e::DWARFPUBTableEntry,header::DWARFCUHeader,::Type{DIETree})
         ats = read(io,f,debug_abbrev,header,DWARF.AbbrevTableSet)
         seek(io,debug_info.sh_offset+s.header.debug_info_offset+e.offset)
