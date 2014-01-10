@@ -10,4 +10,4 @@ before_install:
   - sudo apt-get install libpcre3-dev julia -y
 script:
   - julia -e 'Pkg.init(); run(`ln -s $(pwd()) $(Pkg.dir("DWARF"))`); Pkg.pin("DWARF"); Pkg.resolve()'
-  - julia -e 'using DWARF; @assert isdefined(:DWARF); @assert typeof(DWARF) === Module'
+  - julia ./test/runtests.jl
