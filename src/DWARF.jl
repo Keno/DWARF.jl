@@ -1,5 +1,4 @@
 module DWARF
-    using ELF
     using StrPack
 
     include("constants.jl")
@@ -20,7 +19,6 @@ module DWARF
 
     module DWARF32
         using StrPack
-        using ELF
         using DWARF
 
         @struct immutable CUHeader <: DWARF.DWARFCUHeader
@@ -68,7 +66,6 @@ module DWARF
 
     module DWARF64
         using StrPack
-        using ELF
         using DWARF
 
         @struct immutable CUHeader <: DWARF.DWARFCUHeader
@@ -1159,14 +1156,6 @@ module DWARF
         table
     end
     read(io::IO,::Type{ARTableSet}) = read(io,ARTableSet,:NativeEndian)
-    function read(io,f::ELF.ELFFile,h::ELF.ELFSectionHeader,::Type{ARTable})
-        seek(io,h.sh_offset)
-        ret = ARTable(Array(ARTableSet,0))
-        while position(io) < h.sh_offset + h.sh_size
-            push!(ret.sets,read(io,ARTableSet,f.endianness))
-        end
-        ret
-    end
 
     # pubnames/pubtypes
     type PUBTable
@@ -1200,14 +1189,6 @@ module DWARF
         t
     end
     read(io::IO,::Type{PUBTableSet}) = read(io,PUBTableSet,:NativeEndian)
-    function read(io,f::ELF.ELFFile,h::ELF.ELFSectionHeader,::Type{PUBTable})
-        seek(io,h.sh_offset)
-        ret = PUBTable(Array(PUBTableSet,0))
-        while position(io) < h.sh_offset + h.sh_size
-            push!(ret.sets,read(io,PUBTableSet,f.endianness))
-        end
-        ret
-    end
 
     immutable AbbrevTableEntry
         code::ULEB128
@@ -1252,16 +1233,6 @@ module DWARF
         ret
     end
 
-    function read(io::IO,f::ELF.ELFFile,h::ELF.ELFSectionHeader,::Type{AbbrevTableSet})
-        seek(io,h.sh_offset)
-        read(io,AbbrevTableSet,f.endianness)
-    end
-
-    function read(io::IO,f::ELF.ELFFile,h::ELF.ELFSectionHeader,s::PUBTableSet,::Type{DWARFCUHeader})
-        seek(io,h.sh_offset+s.header.debug_info_offset)
-        read(io,DWARFCUHeader,f.endianness)
-    end
-
     # Assume position is right after number
     function read(io::IO,num::ULEB128,header::DWARFCUHeader,ate::AbbrevTableEntry,::Type{DIE},endianness::Symbol)
         ret = DIE(num,Array(Attribute,0))
@@ -1276,34 +1247,10 @@ module DWARF
         read(io,num,header,ae,DIE)
     end
 
-    function read(io::IO,f::ELF.ELFFile,debug_info::ELF.ELFSectionHeader,debug_abbrev::ELF.ELFSectionHeader,
-        s::PUBTableSet,e::PUBTableEntry,header::DWARFCUHeader,::Type{DIE})
-        ats = read(io,f,debug_abbrev,header,DWARF.AbbrevTableSet)
-        seek(io,debug_info.sh_offset+s.header.debug_info_offset+e.offset)
-        read(io,header,ats,DIE)
-    end
-
-    function read(io::IO,f::ELF.ELFFile,h::ELF.ELFSectionHeader,s::DWARFCUHeader,::Type{AbbrevTableSet})
-        seek(io,h.sh_offset+s.debug_abbrev_offset)
-        read(io,AbbrevTableSet,f.endianness)
-    end
 
     function read(io::IO,::Type{DIE},endianness::Symbol)
         tag = read(io,ULEB128)
         DIE(tag,Array(AttributeSpecification,0))
-    end
-
-    function stuff(io::IO,f::ELF.ELFFile)
-        snames = ELF.names(io,f,f.sheaders)
-        sections = Dict{ASCIIString,ELF.ELFSectionHeader}()
-        for i in 1:length(snames)
-            # Remove leading "."
-            ind = findfirst(DEBUG_SECTIONS,snames[i][2:end])
-            if ind != 0
-                sections[DEBUG_SECTIONS[ind]] = f.sheaders[ind]
-            end
-        end
-        sections
     end
 
     ## Tree Interface
@@ -1344,14 +1291,5 @@ module DWARF
             return ret
         end
         zero(DIETreeNode)
-    end
-
-    function read(io::IO,f::ELF.ELFFile,debug_info::ELF.ELFSectionHeader,debug_abbrev::ELF.ELFSectionHeader,
-        s::PUBTableSet,e::PUBTableEntry,header::DWARFCUHeader,::Type{DIETree})
-        ats = read(io,f,debug_abbrev,header,DWARF.AbbrevTableSet)
-        seek(io,debug_info.sh_offset+s.header.debug_info_offset+e.offset)
-        ret = DIETree(Array(DIETreeNode,0))
-        read(io,header,ats,ret,DIETreeNode,f.endianness)
-        ret
     end
 end #module
