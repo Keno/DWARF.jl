@@ -8,12 +8,12 @@ module DWARF
 
 
     abstract DWARFHeader
-    abstract DWARFCUHeader <: DWARFHeader # Compilation Unit Heerdr
+    abstract DWARFCUHeader <: DWARFHeader # Compilation Unit Header
     abstract DWARFTUHeader <: DWARFHeader # Type Unit Header
     abstract DWARFARHeader <: DWARFHeader # Address Range Header
     abstract DWARFPUBHeader <: DWARFHeader
-    abstract DWARFPUBTableEntry
-    abstract DWARFPUBTableSet
+    abstract PUBTableEntry
+    abstract PUBTableSet
 
     export AbbrevTableEntry, AbbrevTableSet, ULEB128, SLEB128
 
@@ -54,12 +54,12 @@ module DWARF
             debug_info_length::Uint32
         end align_packed
 
-        immutable PUBTableEntry <: DWARF.DWARFPUBTableEntry
+        immutable PUBTableEntry <: DWARF.PUBTableEntry
             offset::Uint32
             name::ASCIIString
         end
 
-        immutable PUBTableSet <: DWARF.DWARFPUBTableSet
+        immutable PUBTableSet <: DWARF.PUBTableSet
             header::PUBHeader
             entries::Array{PUBTableEntry,1}
         end
@@ -103,12 +103,12 @@ module DWARF
             debug_info_length::Uint64
         end align_packed
 
-        immutable PUBTableEntry <: DWARF.DWARFPUBTableEntry
+        immutable PUBTableEntry <: DWARF.PUBTableEntry
             offset::Uint64
             name::ASCIIString
         end
 
-        immutable PUBTableSet <: DWARF.DWARFPUBTableSet
+        immutable PUBTableSet <: DWARF.PUBTableSet
             header::PUBHeader
             entries::Array{PUBTableEntry,1}
         end
@@ -1071,17 +1071,17 @@ module DWARF
     zero{S,T}(::Type{ARTableEntry{S,T}}) = ARTableEntry{S,T}(zero(S),zero(T),zero(T))
 
     const DEBUG_SECTIONS = [
-        ".debug_abbrev",
-        ".debug_aranges",
-        ".debug_frame",
-        ".debug_info",
-        ".debug_line",
-        ".debug_loc",
-        ".debug_macinfo",
-        ".debug_pubnames",
-        ".debug_ranges",
-        ".debug_str",
-        ".debug_types"]
+        "debug_abbrev",
+        "debug_aranges",
+        "debug_frame",
+        "debug_info",
+        "debug_line",
+        "debug_loc",
+        "debug_macinfo",
+        "debug_pubnames",
+        "debug_ranges",
+        "debug_str",
+        "debug_types"]
 
     @struct immutable InitialLength
         val::Uint32
@@ -1150,9 +1150,9 @@ module DWARF
         entry_size = StrPack.calcsize(t,dummy_dict,align_packed)
         while true
             skip(io,position(io)%entry_size) # Align to a boundary that is a multiple of the entry size
-            r = unpack(io,t,dummy_dict,align_packed,endianness,true)
+            r = unpack(io,t,dummy_dict,align_packed,endianness)
             if r==zero(t)
-                break 
+                break
             end
             push!(table.entries,r)
         end
@@ -1170,10 +1170,10 @@ module DWARF
 
     # pubnames/pubtypes
     type PUBTable
-        sets::Array{DWARFPUBTableSet,1}
+        sets::Array{PUBTableSet,1}
     end
 
-    function read{T<:DWARFPUBTableEntry}(io::IO,::Type{T},endianness::Symbol)
+    function read{T<:PUBTableEntry}(io::IO,::Type{T},endianness::Symbol)
         offset = StrPack.endianness_converters[endianness][2](read(io,T.types[1]))
         if offset != 0
             name = strip(readuntil(io,'\0'),'\0')
@@ -1183,7 +1183,7 @@ module DWARF
         T(offset,name)
     end
 
-    function read(io::IO,::Type{DWARFPUBTableSet},endianness::Symbol)
+    function read(io::IO,::Type{PUBTableSet},endianness::Symbol)
         header = read(io,DWARFPUBHeader,endianness)
         if typeof(header) == DWARF32.PUBHeader
             t=DWARF32.PUBTableSet(header,Array(DWARF32.PUBTableEntry,0))
@@ -1199,12 +1199,12 @@ module DWARF
         end
         t
     end
-    read(io::IO,::Type{DWARFPUBTableSet}) = read(io,DWARFPUBTableSet,:NativeEndian)
+    read(io::IO,::Type{PUBTableSet}) = read(io,PUBTableSet,:NativeEndian)
     function read(io,f::ELF.ELFFile,h::ELF.ELFSectionHeader,::Type{PUBTable})
         seek(io,h.sh_offset)
-        ret = PUBTable(Array(DWARFPUBTableSet,0))
+        ret = PUBTable(Array(PUBTableSet,0))
         while position(io) < h.sh_offset + h.sh_size
-            push!(ret.sets,read(io,DWARFPUBTableSet,f.endianness))
+            push!(ret.sets,read(io,PUBTableSet,f.endianness))
         end
         ret
     end
@@ -1257,7 +1257,7 @@ module DWARF
         read(io,AbbrevTableSet,f.endianness)
     end
 
-    function read(io::IO,f::ELF.ELFFile,h::ELF.ELFSectionHeader,s::DWARFPUBTableSet,::Type{DWARFCUHeader})
+    function read(io::IO,f::ELF.ELFFile,h::ELF.ELFSectionHeader,s::PUBTableSet,::Type{DWARFCUHeader})
         seek(io,h.sh_offset+s.header.debug_info_offset)
         read(io,DWARFCUHeader,f.endianness)
     end
@@ -1277,7 +1277,7 @@ module DWARF
     end
 
     function read(io::IO,f::ELF.ELFFile,debug_info::ELF.ELFSectionHeader,debug_abbrev::ELF.ELFSectionHeader,
-        s::DWARFPUBTableSet,e::DWARFPUBTableEntry,header::DWARFCUHeader,::Type{DIE})
+        s::PUBTableSet,e::PUBTableEntry,header::DWARFCUHeader,::Type{DIE})
         ats = read(io,f,debug_abbrev,header,DWARF.AbbrevTableSet)
         seek(io,debug_info.sh_offset+s.header.debug_info_offset+e.offset)
         read(io,header,ats,DIE)
@@ -1297,7 +1297,8 @@ module DWARF
         snames = ELF.names(io,f,f.sheaders)
         sections = Dict{ASCIIString,ELF.ELFSectionHeader}()
         for i in 1:length(snames)
-            ind = findfirst(DEBUG_SECTIONS,snames[i])
+            # Remove leading "."
+            ind = findfirst(DEBUG_SECTIONS,snames[i][2:end])
             if ind != 0
                 sections[DEBUG_SECTIONS[ind]] = f.sheaders[ind]
             end
@@ -1346,7 +1347,7 @@ module DWARF
     end
 
     function read(io::IO,f::ELF.ELFFile,debug_info::ELF.ELFSectionHeader,debug_abbrev::ELF.ELFSectionHeader,
-        s::DWARFPUBTableSet,e::DWARFPUBTableEntry,header::DWARFCUHeader,::Type{DIETree})
+        s::PUBTableSet,e::PUBTableEntry,header::DWARFCUHeader,::Type{DIETree})
         ats = read(io,f,debug_abbrev,header,DWARF.AbbrevTableSet)
         seek(io,debug_info.sh_offset+s.header.debug_info_offset+e.offset)
         ret = DIETree(Array(DIETreeNode,0))
