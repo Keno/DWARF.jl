@@ -281,6 +281,7 @@ module DWARF
                     ($(esc(attr_name)))(name::ULEB128) = new(name)
                     ($(esc(attr_name)))(name::ULEB128,content::$ctype) = new(name,content)
                 end
+                show(io::IO,x::$attr_name) = print(io,$(string(attr_name)),"(",DW_AT[x.name.val], " (",x.name.val,"), ",x.content)
             end
         end
         
@@ -307,7 +308,7 @@ module DWARF
         module DWARF32
             import DWARF.ULEB128
             using ..Attributes
-            immutable StrTableReference <: GenericStringAttribute
+            immutable StrTableReference <: Attributes.StrTableReference
                 name::ULEB128
                 content::Uint32
             end
@@ -316,7 +317,7 @@ module DWARF
         module DWARF64
             import DWARF.ULEB128
             using ..Attributes
-            immutable StrTableReference <: GenericStringAttribute
+            immutable StrTableReference <: Attributes.StrTableReference
                 name::ULEB128
                 content::Uint64
             end
@@ -372,8 +373,9 @@ module DWARF
         abstract SpecializedAttribute <: Attribute
 
         immutable NameAttribute <: SpecializedAttribute
-            ASCIIString
+            name::Union(StrTableReference, ASCIIString)
             NameAttribute(gattr::StringAttribute) = new(gattr.content)
+            NameAttribute(gattr::StrTableReference) = new(gattr)
         end
 
         immutable ExternalFlag <: SpecializedAttribute
@@ -533,11 +535,11 @@ module DWARF
             read(io,content)
             BlockAttribute(name,content)
         end
-        function read(io::IO,::Type{AddressAttribute},header::DWARF.DWARFCUHeader,form,endianness::Symbol)
+        function read(io::IO,::Type{AddressAttribute},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
             T = DWARF.size_to_inttype(header.address_size)
             AddressAttribute{T}(name,fix_endian(read(io,T),endianness))
         end
-        function read(io::IO,::Type{StrTableReference},header::DWARF.DWARFCUHeader,form,endianness::Symbol)
+        function read(io::IO,::Type{StrTableReference},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
             if typeof(header.debug_abbrev_offset) == Uint32
                 DWARF32.StrTableReference(name,fix_endian(read(io,Uint32),endianness))
             elseif typeof(header.debug_abbrev_offset) == Uint64
@@ -1062,7 +1064,7 @@ module DWARF
         attributes::Array{Attribute,1}
     end
 
-    show(io::IO,d::DIE) = print(io,"DIE(type ",d.tag,", ",length(d.attributes)," Attributes)")
+    show(io::IO,d::DIE) = print(io,"DIE(type ",DW_TAG[d.tag.val]," (",d.tag.val,"), ",length(d.attributes)," Attributes)")
 
     immutable ARTableEntry{S,T}
         segment::S
