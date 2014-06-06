@@ -128,6 +128,10 @@ module DWARF
     isequal(a::LEB128,b::LEB128) = (a.val==b.val)
     isequal(a::LEB128,b::Integer) = (a.val==b)
     isequal(a::Integer,b::LEB128) = (b==a.val)
+    ==(a::LEB128,b::LEB128) = isequal(a,b)
+    ==(a::LEB128,b::Integer) = isequal(a.val, b)
+    ==(a::Integer,b::LEB128) = isequal(b, a.val)
+
 
     function read(io::IO, ::Type{ULEB128})
         v = BigInt(0)
@@ -546,6 +550,7 @@ module DWARF
             form::ULEB128
         end
         isequal(a::AttributeSpecification,b::AttributeSpecification) = (a.name == b.name)&&(a.form == b.form)
+        ==(a::AttributeSpecification,b::AttributeSpecification) = isequal(a,b)
 
         function read(io::IO,::Type{AttributeSpecification},endianness::Symbol)
             name = read(io,ULEB128)
@@ -766,6 +771,7 @@ module DWARF
 
         Base.isequal(x::FileEntry,y::FileEntry) = 
             (x.name == y.name && x.dir_idx == y.dir_idx && x.timestamp == y.timestamp && x.filelength == y.filelength)
+        ==(x::FileEntry, y::FileEntry) = isequal(x,y)
 
         function Base.read(io::IO,::Type{FileEntry})
             s = readstring(io)
@@ -877,6 +883,7 @@ module DWARF
             x.epilogue_begin == y.epilogue_begin &&
             x.isa == y.isa &&
             x.discriminator == y.discriminator)
+        ==(x::RegisterState, y::RegisterState) = isequal(x,y)
 
         type StateMachine
             header::Header
@@ -1064,6 +1071,8 @@ module DWARF
     end
 
     isequal{S,T}(a::ARTableEntry{S,T},b::ARTableEntry{S,T}) = (a.segment==b.segment)&&(a.address==b.address)&&(a.length==b.length)
+    =={S,T}(a::ARTableEntry{S,T},b::ARTableEntry{S,T}) = isequal(a,b)
+
 
     zero{S,T}(::Type{ARTableEntry{S,T}}) = ARTableEntry{S,T}(zero(S),zero(T),zero(T))
 
