@@ -3,7 +3,7 @@ module DWARF
 
     include("constants.jl")
 
-    import Base: read, write, zero, bswap, isequal, show, print, show_indented
+    import Base: read, write, zero, bswap, isequal, show, print
 
 
     abstract DWARFHeader
@@ -241,7 +241,7 @@ module DWARF
         import DWARF.SLEB128
         import DWARF.fix_endian
 
-        import Base.isequal, Base.read
+        import Base: isequal, read, show
         export AttributeSpecification, Attribute, GenericStringAttribute,
             Constant1, Constant2, Constant4, Constant8, SConstant, 
             UConstant, GenericStringAttribute, StrTableReference
@@ -304,7 +304,7 @@ module DWARF
         abstract GenericStringAttribute <: GenericAttribute
 
         # # # 32/64-bit dependent types
-        abstract StrTableReference
+        abstract StrTableReference <: GenericStringAttribute
         module DWARF32
             import DWARF.ULEB128
             using ..Attributes
@@ -368,17 +368,17 @@ module DWARF
             mapping
         end
 
-        read(io::IO,name,::Type{UConstant}) = UConstant(name,read(io,ULEB128))
-        read(io::IO,name,::Type{SConstant}) = SConstant(name,read(io,SLEB128))
-        read(io::IO,name,::Type{UReference}) = UReference(name,read(io,ULEB128))
-        read(io::IO,name,::Type{ExplicitFlag}) = ExplicitFlag(name,read(io,Uint8))
+        read(io::IO,name::ULEB128,::Type{UConstant}) = UConstant(name,read(io,ULEB128))
+        read(io::IO,name::ULEB128,::Type{SConstant}) = SConstant(name,read(io,SLEB128))
+        read(io::IO,name::ULEB128,::Type{UReference}) = UReference(name,read(io,ULEB128))
+        read(io::IO,name::ULEB128,::Type{ExplicitFlag}) = ExplicitFlag(name,read(io,Uint8))
         function read{T<:Union(GenericConstantAttribute,GenericReferenceAttribute)}(io::IO,::Type{T},
                                             header::DWARF.DWARFCUHeader,name,form,endianness::Symbol) 
             t = T(name)
             t = T(name,fix_endian(read(io,typeof(t.content)),endianness))
             t
         end
-        read(io::IO,name,T::Type{StringAttribute}) = StringAttribute(name,strip(readuntil(io,'\0'),'\0'))
+        read(io::IO,name::ULEB128,T::Type{StringAttribute}) = StringAttribute(name,strip(readuntil(io,'\0'),'\0'))
         read{T<:GenericAttribute}(io::IO,::Type{T},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol) = read(io,name,T)
         function read(io::IO,::Type{BlockAttribute},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
             if form == DWARF.DW_FORM_block1
@@ -393,7 +393,7 @@ module DWARF
                 error("Unkown Block Form $form")
             end
             content = Array(Uint8,length)
-            read(io,content)
+            read!(io,content)
             BlockAttribute(name,content)
         end
         function read(io::IO,::Type{AddressAttribute},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
@@ -925,7 +925,7 @@ module DWARF
         attributes::Array{Attribute,1}
     end
 
-    show(io::IO,d::DIE) = print(io,"DIE(type ",DW_TAG[d.tag.val]," (",d.tag.val,"), ",length(d.attributes)," Attributes)")
+    show(io::IO,d::DIE) = print(io,"DIE(type ",d.tag.val,", ",length(d.attributes)," Attributes)")
 
     immutable ARTableEntry{S,T}
         segment::S
