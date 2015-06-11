@@ -561,7 +561,8 @@ module DWARF
             elseif opcode == DWARF.DW_OP_constu || opcode == DWARF.DW_OP_plus_uconst ||
                     opcode == DWARF.DW_OP_regx
                 (i,operand) = DWARF.decode(opcodes,i,ULEB128)
-            elseif opcode == DWARF.DW_OP_consts || opcode >= DWARF.DW_OP_breg0 && opcode <= DWARF.DW_OP_breg31
+            elseif opcode == DWARF.DW_OP_consts || opcode == DW_OP_fbreg ||
+                opcode >= DWARF.DW_OP_breg0 && opcode <= DWARF.DW_OP_breg31
                 (i,operand) = DWARF.decode(opcodes,i,SLEB128)
             elseif opcode == DWARF.DW_OP_bregx
                 (i,reg) = DWARF.decode(opcodes,i,ULEB128)
