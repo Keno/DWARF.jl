@@ -559,14 +559,18 @@ module DWARF
                 operand = convert(T,fix_endian(reinterpret(Int64,opcodes[i:i+7])[1],endianness))
                 i+=8
             elseif opcode == DWARF.DW_OP_constu || opcode == DWARF.DW_OP_plus_uconst ||
-                    opcode == DWARF.DW_OP_regx
+                    opcode == DWARF.DW_OP_regx || opcode == DWARF.DW_OP_piece
                 (i,operand) = DWARF.decode(opcodes,i,ULEB128)
-            elseif opcode == DWARF.DW_OP_consts || opcode == DW_OP_fbreg ||
+            elseif opcode == DWARF.DW_OP_consts || opcode == DWARF.DW_OP_fbreg ||
                 opcode >= DWARF.DW_OP_breg0 && opcode <= DWARF.DW_OP_breg31
                 (i,operand) = DWARF.decode(opcodes,i,SLEB128)
             elseif opcode == DWARF.DW_OP_bregx
                 (i,reg) = DWARF.decode(opcodes,i,ULEB128)
                 (i,offset) = DWARF.decode(opcodes,i,SLEB128)
+                operand = (reg,offset)
+            elseif opcode == DWARF.DO_OP_bit_piece
+                (i,reg) = DWARF.decode(opcodes,i,ULEB128)
+                (i,offset) = DWARF.decode(opcodes,i,ULEB128)
                 operand = (reg,offset)
             else
                 return (i,)
