@@ -15,7 +15,8 @@ module DWARF
     abstract PUBTableEntry
     abstract PUBTableSet
 
-    export AbbrevTableEntry, AbbrevTableSet, ULEB128, SLEB128
+    export AbbrevTableEntry, AbbrevTableSet, ULEB128, SLEB128,
+        DIETree, attributes
 
 
     module DWARF32
@@ -257,7 +258,7 @@ module DWARF
         using ObjFileBase
         import ObjFileBase: strtab_lookup
 
-        import Base: isequal, read, show
+        import Base: isequal, read, show, bytestring
         export AttributeSpecification, Attribute, GenericStringAttribute,
             Constant1, Constant2, Constant4, Constant8, SConstant, 
             UConstant, GenericStringAttribute, StrTableReference
@@ -379,6 +380,9 @@ module DWARF
                 content::UInt64
             end
             @Attributes.gattr SectionOffset Attributes.GenericAttribute Uint64
+        end
+        function bytestring(x::StrTableReference, strtab = nothing)
+            strtab_lookup(strtab, x.content)
         end
         function show(io::IO, x::StrTableReference; indent = 0, strtab = nothing)
             print_name(io, x, :StrTableReference; indent = indent)
@@ -1061,6 +1065,10 @@ module DWARF
         attributes::Array{Attribute,1}
     end
 
+    tag(x::DIE) = x.tag
+    tag{T<:Attributes.GenericAttribute}(x::T) = x.name
+    attributes(x::DIE) = x.attributes
+
     const tag_color = :blue
 
     tag_name(tag) = DW_TAG[tag]
@@ -1324,6 +1332,9 @@ module DWARF
         parent::DIENode
     end
 
+    tag(x::DIETreeNode) = tag(x.self)
+    attributes(x::DIETreeNode) = attributes(x.self)
+
     type DIETree <: DIENode
         children::Array{DIETreeNode,1}
     end
@@ -1363,4 +1374,6 @@ module DWARF
         end
         zero(DIETreeNode)
     end
+
+    include("utility.jl")
 end #module
