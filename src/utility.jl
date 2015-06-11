@@ -1,4 +1,4 @@
-import ObjFileBase: Section, DebugSections
+import ObjFileBase: Section, DebugSections, endianness
 
 function read{T<:ObjectHandle}(oh::T,::Type{DWARF.DIETree})
     dbgs = debugsections(oh)
@@ -7,7 +7,7 @@ function read{T<:ObjectHandle}(oh::T,::Type{DWARF.DIETree})
     pos = position(dbgs.oh)
     abbrev = read(dbgs.oh, ObjFileBase.deref(dbgs.debug_abbrev), s, DWARF.AbbrevTableSet)
     seek(dbgs.oh, pos)
-    DIETree = read(oh, s, abbrev, zero(DWARF.DIETree), DWARF.DIETreeNode, ObjFileBase.endianness(oh));
+    DIETree = read(oh, s, abbrev, zero(DWARF.DIETree), DWARF.DIETreeNode, endianness(oh));
     DIETree
 end
 
