@@ -1,3 +1,5 @@
+import ObjFileBase: Section, DebugSections
+
 function read{T<:ObjectHandle}(oh::T,::Type{DWARF.DIETree})
     dbgs = debugsections(oh)
     seek(dbgs.oh, ObjFileBase.sectionoffset(dbgs.debug_info))
