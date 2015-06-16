@@ -530,7 +530,7 @@ module DWARF
 
         function operands(addr_type,opcode,opcodes,i,endianness)
             if opcode == DWARF.DW_OP_addr
-                operand = fix_endian(reinterpret(addr_type,opcodes[i:(i+sizeof(T)-1)])[1],endianness)
+                operand = fix_endian(reinterpret(addr_type,opcodes[i:(i+sizeof(addr_type)-1)])[1],endianness)
                 i+=sizeof(T)-1
             elseif opcode == DWARF.DW_OP_const1u || opcode == DWARF.DW_OP_pick
                 operand = convert(T,opcodes[i])
