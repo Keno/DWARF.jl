@@ -1,7 +1,25 @@
 import ObjFileBase: Section, DebugSections, endianness
 
-function read{T<:ObjectHandle}(oh::T,::Type{DWARF.DIETree})
+immutable DIETreeRef
+    oh
+    strtab
+    tree
+end
+
+function show(io::IO, ref::DIETreeRef)
+    show(io::IO, ref.tree; strtab = ref.strtab)
+end
+
+function dies(oh::ObjectHandle)
     dbgs = debugsections(oh)
+    if dbgs.debug_str !== nothing
+        return DIETreeRef(oh, load_strtab(dbgs.debug_str), read(oh, DIETree; dbgs = dbgs))
+    else
+        return read(oh, DIETree; dbgs = dbgs)
+    end
+end
+
+function read{T<:ObjectHandle}(oh::T,::Type{DWARF.DIETree}; dbgs = debugsections(oh))
     seek(dbgs.oh, ObjFileBase.sectionoffset(dbgs.debug_info))
     s = read(dbgs.oh, DWARF.DWARFCUHeader)
     pos = position(dbgs.oh)

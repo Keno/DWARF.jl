@@ -16,7 +16,7 @@ module DWARF
     abstract PUBTableSet
 
     export AbbrevTableEntry, AbbrevTableSet, ULEB128, SLEB128,
-        DIETree, attributes
+        DIETree, attributes, dies
 
 
     module DWARF32
@@ -477,7 +477,8 @@ module DWARF
             length = read(io,ULEB128).val
             content = Array(Uint8,length)
             read!(io,content)
-            ExprLocAttribute{typeof(header.debug_abbrev_offset)}(name, content)
+            T = DWARF.size_to_inttype(header.address_size)
+            ExprLocAttribute{T}(name, content)
         end
         function read(io::IO,::Type{AddressAttribute},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
             T = DWARF.size_to_inttype(header.address_size)
@@ -531,32 +532,32 @@ module DWARF
         function operands(addr_type,opcode,opcodes,i,endianness)
             if opcode == DWARF.DW_OP_addr
                 operand = fix_endian(reinterpret(addr_type,opcodes[i:(i+sizeof(addr_type)-1)])[1],endianness)
-                i+=sizeof(T)-1
+                i += sizeof(addr_type)
             elseif opcode == DWARF.DW_OP_const1u || opcode == DWARF.DW_OP_pick
-                operand = convert(T,opcodes[i])
+                operand = convert(addr_type,opcodes[i])
                 i += 1
             elseif opcode == DWARF.DW_OP_const1s
-                operand = convert(T,opcodes[i])
+                operand = convert(addr_type,opcodes[i])
                 # Yes, this is actually different from the above, since we need to sign extend properly
-                push!(s.stack,convert(T,fix_endian(reinterpret(Int8,opcodes[i]),endianness)))
+                push!(s.stack,convert(addr_type,fix_endian(reinterpret(Int8,opcodes[i]),endianness)))
                 i += 1
             elseif opcode == DWARF.DW_OP_const2u # 1 2-byte constant
-                operand = convert(T,fix_endian(reinterpret(Uint16,opcodes[i:i+1])[1],endianness))
+                operand = convert(addr_type,fix_endian(reinterpret(Uint16,opcodes[i:i+1])[1],endianness))
                 i+=2
             elseif opcode == DWARF.DW_OP_const2s  || opcode == DWARF.DW_OP_bra || opcode == DWARF.DW_OP_skip # 1 2-byte constant
-                operand = convert(T,fix_endian(reinterpret(Int16,opcodes[i:i+1])[1],endianness))
+                operand = convert(addr_type,fix_endian(reinterpret(Int16,opcodes[i:i+1])[1],endianness))
                 i+=2
             elseif opcode == DWARF.DW_OP_const4u # 1 4-byte constant
-                operand = convert(T,fix_endian(reinterpret(Uint32,opcodes[i:i+3])[1],endianness))
+                operand = convert(addr_type,fix_endian(reinterpret(Uint32,opcodes[i:i+3])[1],endianness))
                 i+=4
             elseif opcode == DWARF.DW_OP_const4u # 1 4-byte constant
-                operand = convert(T,fix_endian(reinterpret(Int32,opcodes[i:i+3])[1],endianness))
+                operand = convert(addr_type,fix_endian(reinterpret(Int32,opcodes[i:i+3])[1],endianness))
                 i+=4
             elseif opcode == DWARF.DW_OP_const8u # 1 8-byte constant
-                operand = convert(T,fix_endian(reinterpret(Uint64,opcodes[i:i+7])[1],endianness))
+                operand = convert(addr_type,fix_endian(reinterpret(Uint64,opcodes[i:i+7])[1],endianness))
                 i+=8
             elseif opcode == DWARF.DW_OP_const8s # 1 8-byte constant
-                operand = convert(T,fix_endian(reinterpret(Int64,opcodes[i:i+7])[1],endianness))
+                operand = convert(addr_type,fix_endian(reinterpret(Int64,opcodes[i:i+7])[1],endianness))
                 i+=8
             elseif opcode == DWARF.DW_OP_constu || opcode == DWARF.DW_OP_plus_uconst ||
                     opcode == DWARF.DW_OP_regx || opcode == DWARF.DW_OP_piece
@@ -568,7 +569,7 @@ module DWARF
                 (i,reg) = DWARF.decode(opcodes,i,ULEB128)
                 (i,offset) = DWARF.decode(opcodes,i,SLEB128)
                 operand = (reg,offset)
-            elseif opcode == DWARF.DO_OP_bit_piece
+            elseif opcode == DWARF.DW_OP_bit_piece
                 (i,reg) = DWARF.decode(opcodes,i,ULEB128)
                 (i,offset) = DWARF.decode(opcodes,i,ULEB128)
                 operand = (reg,offset)
@@ -713,7 +714,7 @@ module DWARF
             while i <= length(opcodes)
                 opcode = opcodes[i]
                 i += 1
-                ops = operands(addr_type, opcode, opcodes, i, ENDIAN_BOM)
+                ops = operands(addr_type, opcode, opcodes, i, endianness)
                 i = ops[1]
                 print_with_color(:blue, io, op_name(opcode))
                 print(io," ")
