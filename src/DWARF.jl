@@ -146,6 +146,7 @@ module DWARF
     ==(a::LEB128,b::LEB128) = isequal(a,b)
     ==(a::LEB128,b::Integer) = isequal(a.val, b)
     ==(a::Integer,b::LEB128) = isequal(b, a.val)
+    Base.zero{T<:LEB128}(::Type{T}) = convert(T,0)
 
 
     function read(io::IO, ::Type{ULEB128})
@@ -260,7 +261,7 @@ module DWARF
 
         import Base: isequal, read, show, bytestring
         export AttributeSpecification, Attribute, GenericStringAttribute,
-            Constant1, Constant2, Constant4, Constant8, SConstant, 
+            Constant1, Constant2, Constant4, Constant8, SConstant,
             UConstant, GenericStringAttribute, StrTableReference
 
 
@@ -279,11 +280,11 @@ module DWARF
         ###
         # Generic Attributes
         #
-        # DWARF is designed in such a way that even consumers who may not understand 
-        # all the possible arguments can still parse any DAWRF file. To do so, they 
+        # DWARF is designed in such a way that even consumers who may not understand
+        # all the possible arguments can still parse any DAWRF file. To do so, they
         # have a fixed number of storage formats that need to be supported. In this
         # implementation attributes which have no specialized form are left as generic
-        # attributes in the tree. 
+        # attributes in the tree.
         ##
 
         abstract Attribute
@@ -295,6 +296,7 @@ module DWARF
             name::ULEB128
             content::T
         end
+        Base.convert{T}(::Type{T},x::AddressAttribute{T}) = x.content
 
         immutable BlockAttribute <: GenericAttribute
             name::ULEB128
@@ -330,12 +332,15 @@ module DWARF
                 immutable $attr_name <: $supertype
                     name::ULEB128
                     content::$ctype
-                    ($(attr_name))(name::ULEB128) = new(name)
+                    ($(attr_name))(name::ULEB128) = new(name,zero($ctype))
                     ($(attr_name))(name::ULEB128,content::$ctype) = new(name,content)
                 end
                 function Base.show(io::IO,x::$attr_name; indent = 0, kwargs...)
                     Attributes.print_name(io, x, $(string(attr_name)); indent = indent)
                     println(io, x.content)
+                end
+                function Base.convert{T<:Integer}(::Type{T},x::$attr_name)
+                    convert(T,x.content)
                 end
             end)
         end
@@ -350,6 +355,7 @@ module DWARF
         @gattr UConstant GenericConstantAttribute ULEB128
 
         abstract GenericReferenceAttribute <: GenericAttribute
+        abstract DebugInfoReference <: GenericReferenceAttribute
 
         @gattr Reference1 GenericReferenceAttribute Uint8
         @gattr Reference2 GenericReferenceAttribute Uint16
@@ -369,7 +375,8 @@ module DWARF
                 name::ULEB128
                 content::UInt32
             end
-            @Attributes.gattr SectionOffset Attributes.GenericAttribute Uint32
+            @Attributes.gattr DebugInfoReference Attributes.DebugInfoReference UInt32
+            @Attributes.gattr SectionOffset Attributes.GenericAttribute UInt32
         end
 
         module DWARF64
@@ -379,7 +386,8 @@ module DWARF
                 name::ULEB128
                 content::UInt64
             end
-            @Attributes.gattr SectionOffset Attributes.GenericAttribute Uint64
+            @Attributes.gattr DebugInfoReference Attributes.DebugInfoReference UInt64
+            @Attributes.gattr SectionOffset Attributes.GenericAttribute UInt64
         end
         function bytestring(x::StrTableReference, strtab = nothing)
             strtab_lookup(strtab, x.content)
@@ -423,7 +431,7 @@ module DWARF
             SConstant,              # DW_FORM_sdata
             StrTableReference,      # DW_FORM_strp
             UConstant,              # DW_FORM_udata
-            UnimplementedAttribute, # DW_FORM_ref_addr
+            DebugInfoReference,     # DW_FORM_ref_addr
             Reference1,             # DW_FORM_ref1
             Reference2,             # DW_FORM_ref2
             Reference4,             # DW_FORM_ref4
@@ -450,7 +458,7 @@ module DWARF
         read(io::IO,name::ULEB128,::Type{ExplicitFlag}) = ExplicitFlag(name,read(io,Uint8))
         read(io::IO,name::ULEB128,::Type{ImplicitFlag}) = ImplicitFlag(name,nothing)
         function read{T<:Union(GenericConstantAttribute,GenericReferenceAttribute)}(io::IO,::Type{T},
-                                            header::DWARF.DWARFCUHeader,name,form,endianness::Symbol) 
+                                            header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
             t = T(name)
             t = T(name,fix_endian(read(io,typeof(t.content)),endianness))
             t
@@ -489,6 +497,13 @@ module DWARF
                 DWARF32.StrTableReference(name,fix_endian(read(io,Uint32),endianness))
             elseif typeof(header.debug_abbrev_offset) == Uint64
                 DWARF64.StrTableReference(name,fix_endian(read(io,Uint64),endianness))
+            end
+        end
+        function read(io::IO,::Type{DebugInfoReference},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
+            if typeof(header.debug_abbrev_offset) == Uint32 && header.version > 2
+                DWARF32.DebugInfoReference(name,fix_endian(read(io,Uint32),endianness))
+            else
+                DWARF64.DebugInfoReference(name,fix_endian(read(io,Uint64),endianness))
             end
         end
         function read(io::IO,::Type{SectionOffset},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
@@ -751,7 +766,7 @@ module DWARF
         end
     end
 
-    # The line table is encoded as a state machine program 
+    # The line table is encoded as a state machine program
     # operating on a register machine, whose register represent the
     # values the debugger needs to know about the current source location
     module LineTableSupport
@@ -778,7 +793,7 @@ module DWARF
             filelength::BigInt
         end
 
-        Base.isequal(x::FileEntry,y::FileEntry) = 
+        Base.isequal(x::FileEntry,y::FileEntry) =
             (x.name == y.name && x.dir_idx == y.dir_idx && x.timestamp == y.timestamp && x.filelength == y.filelength)
         ==(x::FileEntry, y::FileEntry) = isequal(x,y)
 
@@ -790,7 +805,7 @@ module DWARF
             return FileEntry(s,read(io,ULEB128),read(io,ULEB128),read(io,ULEB128))
         end
 
-        function unpack(io,::Type{HeaderStub}) 
+        function unpack(io,::Type{HeaderStub})
             T = Uint32
             length = read(io,T)
             if length == 0xffffffff
@@ -867,7 +882,7 @@ module DWARF
             function RegisterState(x::RegisterState;
                     address = x.address, op_index = x.op_index, file = x.file, line = x.line,
                     column = x.column, is_stmt = x.is_stmt, basic_block = x.basic_block,
-                    end_sequence = x.end_sequence, prologue_end = x.prologue_end, 
+                    end_sequence = x.end_sequence, prologue_end = x.prologue_end,
                     epilogue_begin = x.epilogue_begin, isa = x.isa, discriminator = x.discriminator)
                 new(address,op_index,file,line,column,is_stmt,basic_block,end_sequence,prologue_end,
                     epilogue_begin,isa,discriminator)
@@ -903,7 +918,7 @@ module DWARF
             m.state = RegisterState(m.state,
                 address = m.state.address + m.header.stub.minimum_instruction_length *
                     div(m.state.op_index + op_adv,m.header.stub.maximum_operations_per_instruction),
-                op_index = m.state.op_index + 
+                op_index = m.state.op_index +
                     mod(m.state.op_index + op_adv,m.header.stub.maximum_operations_per_instruction))
         end
 
@@ -923,7 +938,7 @@ module DWARF
                 ex_op = read(io,Uint8)
                 if ex_op == DWARF.DW_LNE_end_sequence
                     m.state = RegisterState(m.state,end_sequence = true)
-                    ret = (true,m.state) 
+                    ret = (true,m.state)
                     m.state = RegisterState(m.header.stub.default_is_stmt > 0)
                     position(io) > pos+size+1 && error("Malformed extended instruction")
                     return ret
@@ -940,7 +955,7 @@ module DWARF
                     push!(m.file_names,read(io,FileEntry))
                 elseif ex_op == DWARF.DW_LNE_set_discriminator
                     m.state = RegisterState(m.state,discriminator = read(io,ULEB128))
-                else 
+                else
                     error("Unrecognized extended opcode $ex_op")
                 end
                 position(io) > pos+size+1 && error("Malformed extended instruction (op=$ex_op, pos=$pos, size=$size, iopos=$(position(io)))")
@@ -979,43 +994,43 @@ module DWARF
                     m.state = RegisterState(m.state,column = read(io,ULEB128))
                 elseif op == DWARF.DW_LNS_negate_stmt
                     if m.header.standard_opcode_lengths[DWARF.DW_LNS_negate_stmt] != 0
-                        error("Malformed Instruction")             
+                        error("Malformed Instruction")
                     end
                     m.state = RegisterState(m.state,is_stmt = !m.state.is_stmt)
                 elseif op == DWARF.DW_LNS_set_basic_block
                     if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_basic_block] != 0
-                        error("Malformed Instruction")             
+                        error("Malformed Instruction")
                     end
                     m.state = RegisterState(m.state,basic_block = true)
                 elseif op == DWARF.DW_LNS_const_add_pc
                     if m.header.standard_opcode_lengths[DWARF.DW_LNS_const_add_pc] != 0
-                        error("Malformed Instruction")             
+                        error("Malformed Instruction")
                     end
                     pc_adv!(m,255)
                 elseif op == DWARF.DW_LNS_fixed_advance_pc
                     if m.header.standard_opcode_lengths[DWARF.DW_LNS_fixed_advance_pc] != 1
-                        error("Malformed Instruction")             
-                    end   
+                        error("Malformed Instruction")
+                    end
                     m.state = RegisterState(m.state,
                         address = m.state.address + read(io,Uint16),
                         op_index = 0)
                 elseif op == DWARF.DW_LNS_set_prologue_end
                     if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_prologue_end] != 0
-                        error("Malformed Instruction")             
-                    end 
+                        error("Malformed Instruction")
+                    end
                     m.state = RegisterState(m.state, prologue_end = false)
                 elseif op == DWARF.DW_LNS_set_epilogue_begin
                     if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_epilogue_begin] != 0
-                        error("Malformed Instruction")             
-                    end 
+                        error("Malformed Instruction")
+                    end
                     m.state = RegisterState(m.state, epilogue_begin = false)
                 elseif op == DWARF.DW_LNS_set_epilogue_begin
                     if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_epilogue_begin] != 0
-                        error("Malformed Instruction")             
-                    end 
+                        error("Malformed Instruction")
+                    end
                     m.state = RegisterState(m.state, isa = read(io,ULEB128))
                 end
-            else 
+            else
                 # special opcode
                 # standard actions
                 m.state = RegisterState(m.state,
@@ -1049,7 +1064,7 @@ module DWARF
 
         import Base: start, next, done
 
-        function start(x::LineTable) 
+        function start(x::LineTable)
             # The header length is the number of bytes after the header length
             # The fields from the start are length (header_type), version (Uint16) and header_length(header_type)
             # plus an additional Uint32 if the header_type is Uint64
@@ -1160,7 +1175,7 @@ module DWARF
 
     immutable Zero
     end
-    
+
     bswap(::Zero) = Zero()
     read(io::IO,::Type{Zero}) = Zero()
     zero(::Type{Zero}) = Zero()
@@ -1252,7 +1267,7 @@ module DWARF
         attributes::Array{AttributeSpecification,1}
     end
 
-    immutable AbbrevTableSet 
+    immutable AbbrevTableSet
         entries::Array{AbbrevTableEntry,1}
     end
     zero(::Type{AbbrevTableEntry}) = AbbrevTableEntry(ULEB128(BigInt(0)),ULEB128(BigInt(0)),UInt8(0),Array(AttributeSpecification,0))
@@ -1373,9 +1388,8 @@ module DWARF
             push!(parent.children,ret)
             if(ae.has_children == DW_CHILDREN_yes)
                 read(io,header,ats,ret,DIETreeNode,endianness)
-            else
-                read(io,header,ats,parent,DIETreeNode,endianness)
             end
+            isa(parent,DIETreeNode) && read(io,header,ats,parent,DIETreeNode,endianness)
             return ret
         end
         zero(DIETreeNode)

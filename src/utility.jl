@@ -1,4 +1,6 @@
 import ObjFileBase: Section, DebugSections, endianness
+import Base: start, next, done
+export DIETrees
 
 immutable DIETreeRef
     oh
@@ -19,15 +21,27 @@ function dies(oh::ObjectHandle)
     end
 end
 
-function read{T<:ObjectHandle}(oh::T,::Type{DWARF.DIETree}; dbgs = debugsections(oh))
-    seek(dbgs.oh, ObjFileBase.sectionoffset(dbgs.debug_info))
+read{T<:ObjectHandle}(oh::T,::Type{DWARF.DIETree}) = read(debugsections(oh), DIETree)
+function read(dbgs::DebugSections,::Type{DWARF.DIETree}, offset = 0)
+    seek(dbgs.oh, ObjFileBase.sectionoffset(dbgs.debug_info)+offset)
     s = read(dbgs.oh, DWARF.DWARFCUHeader)
     pos = position(dbgs.oh)
     abbrev = read(dbgs.oh, ObjFileBase.deref(dbgs.debug_abbrev), s, DWARF.AbbrevTableSet)
     seek(dbgs.oh, pos)
-    DIETree = read(oh, s, abbrev, zero(DWARF.DIETree), DWARF.DIETreeNode, endianness(oh));
+    DIETree = read(dbgs.oh, s, abbrev, zero(DWARF.DIETree), DWARF.DIETreeNode, endianness(dbgs.oh));
     DIETree
 end
+
+immutable DIETrees
+    dbgs
+end
+
+start(dt::DIETrees) = 0
+function next(dt::DIETrees, off)
+    v = read(dt.dbgs, DIETree, off)
+    (v,position(dt.dbgs.oh)-sectionoffset(dt.dbgs.debug_info))
+end
+done(dt::DIETrees,off) = off >= ObjFileBase.sectionsize(dt.dbgs.debug_info)
 
 function read{T<:ObjectHandle,S}(oh::T,sec::Section{S},::Type{DWARF.ARTable})
     @assert T <: S
