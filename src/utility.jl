@@ -17,11 +17,11 @@ function dies(oh::ObjectHandle)
     if dbgs.debug_str !== nothing
         return DIETreeRef(oh, load_strtab(dbgs.debug_str), read(oh, DIETree; dbgs = dbgs))
     else
-        return read(oh, DIETree; dbgs = dbgs)
+        return read(dbgs, DIETree)
     end
 end
 
-read{T<:ObjectHandle}(oh::T,::Type{DWARF.DIETree}) = read(debugsections(oh), DIETree)
+read{T<:ObjectHandle}(oh::T,::Type{DWARF.DIETree}; dbgs = debugsections(oh)) = read(dbgs, DIETree)
 function read(dbgs::DebugSections,::Type{DWARF.DIETree}, offset = 0)
     seek(dbgs.oh, ObjFileBase.sectionoffset(dbgs.debug_info)+offset)
     s = read(dbgs.oh, DWARF.DWARFCUHeader)
@@ -39,7 +39,7 @@ end
 start(dt::DIETrees) = 0
 function next(dt::DIETrees, off)
     v = read(dt.dbgs, DIETree, off)
-    (v,position(dt.dbgs.oh)-sectionoffset(dt.dbgs.debug_info))
+    (DIETreeRef(dt.dbgs.oh,load_strtab(dt.dbgs.debug_str),v),position(dt.dbgs.oh)-sectionoffset(dt.dbgs.debug_info))
 end
 done(dt::DIETrees,off) = off >= ObjFileBase.sectionsize(dt.dbgs.debug_info)
 

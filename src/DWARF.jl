@@ -1,10 +1,12 @@
+
 module DWARF
-    using StrPack
     using ObjFileBase
+    using StrPack
+    __init__() = @__struct_init__
 
     include("constants.jl")
 
-    import Base: read, write, zero, bswap, isequal, show, print, hash
+    import Base: read, write, zero, bswap, isequal, show, print, hash, ==
 
 
     abstract DWARFHeader
@@ -20,8 +22,9 @@ module DWARF
 
 
     module DWARF32
-        using StrPack
         using DWARF
+        using StrPack
+        __init__() = @__struct_init__
 
         @struct immutable CUHeader <: DWARF.DWARFCUHeader
             unit_length::Uint32
@@ -67,8 +70,9 @@ module DWARF
     end
 
     module DWARF64
-        using StrPack
         using DWARF
+        using StrPack
+        __init__() = @__struct_init__
 
         @struct immutable CUHeader <: DWARF.DWARFCUHeader
             unit_length::Uint64
@@ -259,7 +263,7 @@ module DWARF
         using ObjFileBase
         import ObjFileBase: strtab_lookup
 
-        import Base: isequal, read, show, bytestring
+        import Base: isequal, read, show, bytestring, ==
         export AttributeSpecification, Attribute, GenericStringAttribute,
             Constant1, Constant2, Constant4, Constant8, SConstant,
             UConstant, GenericStringAttribute, StrTableReference
@@ -289,8 +293,6 @@ module DWARF
 
         abstract Attribute
         abstract GenericAttribute <: Attribute
-
-        using StrPack
 
         immutable AddressAttribute{T} <: GenericAttribute
             name::ULEB128
@@ -773,6 +775,7 @@ module DWARF
         using StrPack
 
         import ..ULEB128, ..SLEB128, ..DWARF
+        import Base: ==
 
         immutable HeaderStub{T}
             length::T
@@ -1137,18 +1140,7 @@ module DWARF
 
     zero{S,T}(::Type{ARTableEntry{S,T}}) = ARTableEntry{S,T}(zero(S),zero(T),zero(T))
 
-    const DEBUG_SECTIONS = [
-        "debug_abbrev",
-        "debug_aranges",
-        "debug_frame",
-        "debug_info",
-        "debug_line",
-        "debug_loc",
-        "debug_macinfo",
-        "debug_pubnames",
-        "debug_ranges",
-        "debug_str",
-        "debug_types"]
+    const DEBUG_SECTIONS = ObjFileBase.DEBUG_SECTIONS
 
     @struct immutable InitialLength
         val::Uint32

@@ -81,6 +81,10 @@ end
     const DW_TAG_rvalue_reference_type = 0x42 #
     const DW_TAG_template_alias = 0x43 #
     const DW_TAG_lo_user = 0x4080 #
+
+    # GNU Extensions
+    const DW_TAG_GNU_template_parameter_pack = 0x4107
+
     const DW_TAG_hi_user = 0xffff #
 end
 
