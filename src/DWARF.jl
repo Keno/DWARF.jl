@@ -294,11 +294,11 @@ module DWARF
         abstract Attribute
         abstract GenericAttribute <: Attribute
 
-        immutable AddressAttribute{T} <: GenericAttribute
+        immutable AddressAttribute{T<:Union(Int64,Int32,Ptr{Void})} <: GenericAttribute
             name::ULEB128
             content::T
         end
-        Base.convert{T}(::Type{T},x::AddressAttribute{T}) = x.content
+        Base.convert{T<:Union(Int64,Int32,Ptr{Void})}(::Type{T},x::AddressAttribute{T}) = x.content
 
         immutable BlockAttribute <: GenericAttribute
             name::ULEB128
