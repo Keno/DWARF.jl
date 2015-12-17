@@ -27,38 +27,38 @@ module DWARF
         __init__() = @__struct_init__
 
         @struct immutable CUHeader <: DWARF.DWARFCUHeader
-            unit_length::Uint32
-            version::Uint16
-            debug_abbrev_offset::Uint32
-            address_size::Uint8
+            unit_length::UInt32
+            version::UInt16
+            debug_abbrev_offset::UInt32
+            address_size::UInt8
         end align_packed
 
         @struct immutable TUHeader <: DWARF.DWARFTUHeader
-            unit_length::Uint32
-            version::Uint16
-            debug_abbrev_offset::Uint32
-            address_size::Uint8
-            type_signature::Uint64
-            type_offset::Uint32
+            unit_length::UInt32
+            version::UInt16
+            debug_abbrev_offset::UInt32
+            address_size::UInt8
+            type_signature::UInt64
+            type_offset::UInt32
         end align_packed
 
         @struct immutable ARHeader <: DWARF.DWARFARHeader
-            unit_length::Uint32
-            version::Uint16
-            debug_info_offset::Uint32
-            address_size::Uint8
-            segment_size::Uint8
+            unit_length::UInt32
+            version::UInt16
+            debug_info_offset::UInt32
+            address_size::UInt8
+            segment_size::UInt8
         end align_packed
 
         @struct immutable PUBHeader <: DWARF.DWARFPUBHeader
-            unit_length::Uint32
-            version::Uint16
-            debug_info_offset::Uint32
-            debug_info_length::Uint32
+            unit_length::UInt32
+            version::UInt16
+            debug_info_offset::UInt32
+            debug_info_length::UInt32
         end align_packed
 
         immutable PUBTableEntry <: DWARF.PUBTableEntry
-            offset::Uint32
+            offset::UInt32
             name::ASCIIString
         end
 
@@ -75,39 +75,39 @@ module DWARF
         __init__() = @__struct_init__
 
         @struct immutable CUHeader <: DWARF.DWARFCUHeader
-            unit_length::Uint64
-            version::Uint16
-            debug_abbrev_offset::Uint64
-            address_size::Uint8
-            type_offset::Uint64
+            unit_length::UInt64
+            version::UInt16
+            debug_abbrev_offset::UInt64
+            address_size::UInt8
+            type_offset::UInt64
         end align_packed
 
         @struct immutable TUHeader <: DWARF.DWARFTUHeader
-            unit_length::Uint32
-            version::Uint16
-            debug_abbrev_offset::Uint32
-            address_size::Uint8
-            type_signature::Uint64
-            type_offset::Uint64
+            unit_length::UInt32
+            version::UInt16
+            debug_abbrev_offset::UInt32
+            address_size::UInt8
+            type_signature::UInt64
+            type_offset::UInt64
         end align_packed
 
         @struct immutable ARHeader <: DWARF.DWARFARHeader
-            unit_length::Uint32
-            version::Uint16
-            debug_info_offset::Uint64
-            address_size::Uint8
-            segment_size::Uint8
+            unit_length::UInt32
+            version::UInt16
+            debug_info_offset::UInt64
+            address_size::UInt8
+            segment_size::UInt8
         end align_packed
 
         @struct immutable PUBHeader <: DWARF.DWARFPUBHeader
-            unit_length::Uint32
-            version::Uint16
-            debug_info_offset::Uint64
-            debug_info_length::Uint64
+            unit_length::UInt32
+            version::UInt16
+            debug_info_offset::UInt64
+            debug_info_length::UInt64
         end align_packed
 
         immutable PUBTableEntry <: DWARF.PUBTableEntry
-            offset::Uint64
+            offset::UInt64
             name::ASCIIString
         end
 
@@ -157,7 +157,7 @@ module DWARF
         v = BigInt(0)
         shift = 0
         while true
-            c = read(io,Uint8)
+            c = read(io,UInt8)
             v |= BigInt(c&0x7f)<<shift
             if (c&0x80)==0 #is last bit
                 break
@@ -181,7 +181,7 @@ module DWARF
         end
     end
 
-    function decode(data::Array{Uint8,1}, offset, ::Type{ULEB128})
+    function decode(data::Array{UInt8,1}, offset, ::Type{ULEB128})
         v = BigInt(0)
         shift = 0
         i=0
@@ -197,7 +197,7 @@ module DWARF
         (offset+i,ULEB128(v))
     end
 
-    function decode(data::Array{Uint8,1}, offset, ::Type{SLEB128})
+    function decode(data::Array{UInt8,1}, offset, ::Type{SLEB128})
         v = BigInt(0)
         shift = 0
         c=0
@@ -223,7 +223,7 @@ module DWARF
         shift = 0
         c=0
         while(true)
-            c = read(io,Uint8)
+            c = read(io,UInt8)
             v |= BigInt(c&0x7f)<<shift
             if (c&0x80)==0 #is last bit
                 break
@@ -241,7 +241,7 @@ module DWARF
         x = x.val
         more = true
         while more
-            v = (x % Uint8) & 0x7f
+            v = (x % UInt8) & 0x7f
             x >>= 7
             if ((x == 0 && ((v & 0x40) == 0)) || (x == -1 && ((v & 0x40) > 0)))
                 more = false
@@ -294,11 +294,13 @@ module DWARF
         abstract Attribute
         abstract GenericAttribute <: Attribute
 
-        immutable AddressAttribute{T<:Union(Int64,UInt64,Int32,UInt32,Ptr{Void})} <: GenericAttribute
+        immutable AddressAttribute{T<:Union{Int64,UInt64,Int32,UInt32,Ptr{Void}}} <: GenericAttribute
             name::ULEB128
             content::T
         end
-        Base.convert{T<:Union(Int64,UInt64,Int32,UInt32,Ptr{Void})}(::Type{T},x::AddressAttribute{T}) = x.content
+        for T in (Int64,UInt64,Int32,UInt32,Ptr{Void})
+            Base.convert(::Type{T},x::AddressAttribute{T}) = x.content
+        end
 
         immutable BlockAttribute <: GenericAttribute
             name::ULEB128
@@ -347,22 +349,22 @@ module DWARF
             end)
         end
 
-        @gattr ExplicitFlag GenericAttribute Uint8
+        @gattr ExplicitFlag GenericAttribute UInt8
         @gattr ImplicitFlag GenericAttribute Void
-        @gattr Constant1 GenericConstantAttribute Uint8
-        @gattr Constant2 GenericConstantAttribute Uint16
-        @gattr Constant4 GenericConstantAttribute Uint32
-        @gattr Constant8 GenericConstantAttribute Uint64
+        @gattr Constant1 GenericConstantAttribute UInt8
+        @gattr Constant2 GenericConstantAttribute UInt16
+        @gattr Constant4 GenericConstantAttribute UInt32
+        @gattr Constant8 GenericConstantAttribute UInt64
         @gattr SConstant GenericConstantAttribute SLEB128
         @gattr UConstant GenericConstantAttribute ULEB128
 
         abstract GenericReferenceAttribute <: GenericAttribute
         abstract DebugInfoReference <: GenericReferenceAttribute
 
-        @gattr Reference1 GenericReferenceAttribute Uint8
-        @gattr Reference2 GenericReferenceAttribute Uint16
-        @gattr Reference4 GenericReferenceAttribute Uint32
-        @gattr Reference8 GenericReferenceAttribute Uint64
+        @gattr Reference1 GenericReferenceAttribute UInt8
+        @gattr Reference2 GenericReferenceAttribute UInt16
+        @gattr Reference4 GenericReferenceAttribute UInt32
+        @gattr Reference8 GenericReferenceAttribute UInt64
         @gattr UReference GenericReferenceAttribute ULEB128
 
         abstract GenericStringAttribute <: GenericAttribute
@@ -457,9 +459,9 @@ module DWARF
         read(io::IO,name::ULEB128,::Type{UConstant}) = UConstant(name,read(io,ULEB128))
         read(io::IO,name::ULEB128,::Type{SConstant}) = SConstant(name,read(io,SLEB128))
         read(io::IO,name::ULEB128,::Type{UReference}) = UReference(name,read(io,ULEB128))
-        read(io::IO,name::ULEB128,::Type{ExplicitFlag}) = ExplicitFlag(name,read(io,Uint8))
+        read(io::IO,name::ULEB128,::Type{ExplicitFlag}) = ExplicitFlag(name,read(io,UInt8))
         read(io::IO,name::ULEB128,::Type{ImplicitFlag}) = ImplicitFlag(name,nothing)
-        function read{T<:Union(GenericConstantAttribute,GenericReferenceAttribute)}(io::IO,::Type{T},
+        function read{T<:Union{GenericConstantAttribute,GenericReferenceAttribute}}(io::IO,::Type{T},
                                             header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
             t = T(name)
             t = T(name,fix_endian(read(io,typeof(t.content)),endianness))
@@ -469,23 +471,23 @@ module DWARF
         read{T<:GenericAttribute}(io::IO,::Type{T},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol) = read(io,name,T)
         function read(io::IO,::Type{BlockAttribute},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
             if form == DWARF.DW_FORM_block1
-                length = read(io,Uint8)
+                length = read(io,UInt8)
             elseif form == DWARF.DW_FORM_block2
-                length = fix_endian(read(io,Uint16),endianness)
+                length = fix_endian(read(io,UInt16),endianness)
             elseif form == DWARF.DW_FORM_block4
-                length = fix_endian(read(io,Uint32),endianness)
+                length = fix_endian(read(io,UInt32),endianness)
             elseif form == DWARF.DW_FORM_block
                 length = fix_endian(read(io,ULEB128),endianness)
             else
                 error("Unkown Block Form $form")
             end
-            content = Array(Uint8,length)
+            content = Array(UInt8,length)
             read!(io,content)
             BlockAttribute(name,content)
         end
         function read(io::IO,::Type{ExprLocAttribute},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
             length = read(io,ULEB128).val
-            content = Array(Uint8,length)
+            content = Array(UInt8,length)
             read!(io,content)
             T = DWARF.size_to_inttype(header.address_size)
             ExprLocAttribute{T}(name, content)
@@ -495,24 +497,24 @@ module DWARF
             AddressAttribute{T}(name,fix_endian(read(io,T),endianness))
         end
         function read(io::IO,::Type{StrTableReference},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
-            if typeof(header.debug_abbrev_offset) == Uint32
-                DWARF32.StrTableReference(name,fix_endian(read(io,Uint32),endianness))
-            elseif typeof(header.debug_abbrev_offset) == Uint64
-                DWARF64.StrTableReference(name,fix_endian(read(io,Uint64),endianness))
+            if typeof(header.debug_abbrev_offset) == UInt32
+                DWARF32.StrTableReference(name,fix_endian(read(io,UInt32),endianness))
+            elseif typeof(header.debug_abbrev_offset) == UInt64
+                DWARF64.StrTableReference(name,fix_endian(read(io,UInt64),endianness))
             end
         end
         function read(io::IO,::Type{DebugInfoReference},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
-            if typeof(header.debug_abbrev_offset) == Uint32 && header.version > 2
-                DWARF32.DebugInfoReference(name,fix_endian(read(io,Uint32),endianness))
+            if typeof(header.debug_abbrev_offset) == UInt32 && header.version > 2
+                DWARF32.DebugInfoReference(name,fix_endian(read(io,UInt32),endianness))
             else
-                DWARF64.DebugInfoReference(name,fix_endian(read(io,Uint64),endianness))
+                DWARF64.DebugInfoReference(name,fix_endian(read(io,UInt64),endianness))
             end
         end
         function read(io::IO,::Type{SectionOffset},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
-            if typeof(header.debug_abbrev_offset) == Uint32
-                DWARF32.SectionOffset(name,fix_endian(read(io,Uint32),endianness))
-            elseif typeof(header.debug_abbrev_offset) == Uint64
-                DWARF64.SectionOffset(name,fix_endian(read(io,Uint64),endianness))
+            if typeof(header.debug_abbrev_offset) == UInt32
+                DWARF32.SectionOffset(name,fix_endian(read(io,UInt32),endianness))
+            elseif typeof(header.debug_abbrev_offset) == UInt64
+                DWARF64.SectionOffset(name,fix_endian(read(io,UInt64),endianness))
             end
         end
 
@@ -559,19 +561,19 @@ module DWARF
                 push!(s.stack,convert(addr_type,fix_endian(reinterpret(Int8,opcodes[i]),endianness)))
                 i += 1
             elseif opcode == DWARF.DW_OP_const2u # 1 2-byte constant
-                operand = convert(addr_type,fix_endian(reinterpret(Uint16,opcodes[i:i+1])[1],endianness))
+                operand = convert(addr_type,fix_endian(reinterpret(UInt16,opcodes[i:i+1])[1],endianness))
                 i+=2
             elseif opcode == DWARF.DW_OP_const2s  || opcode == DWARF.DW_OP_bra || opcode == DWARF.DW_OP_skip # 1 2-byte constant
                 operand = convert(addr_type,fix_endian(reinterpret(Int16,opcodes[i:i+1])[1],endianness))
                 i+=2
             elseif opcode == DWARF.DW_OP_const4u # 1 4-byte constant
-                operand = convert(addr_type,fix_endian(reinterpret(Uint32,opcodes[i:i+3])[1],endianness))
+                operand = convert(addr_type,fix_endian(reinterpret(UInt32,opcodes[i:i+3])[1],endianness))
                 i+=4
             elseif opcode == DWARF.DW_OP_const4u # 1 4-byte constant
                 operand = convert(addr_type,fix_endian(reinterpret(Int32,opcodes[i:i+3])[1],endianness))
                 i+=4
             elseif opcode == DWARF.DW_OP_const8u # 1 8-byte constant
-                operand = convert(addr_type,fix_endian(reinterpret(Uint64,opcodes[i:i+7])[1],endianness))
+                operand = convert(addr_type,fix_endian(reinterpret(UInt64,opcodes[i:i+7])[1],endianness))
                 i+=8
             elseif opcode == DWARF.DW_OP_const8s # 1 8-byte constant
                 operand = convert(addr_type,fix_endian(reinterpret(Int64,opcodes[i:i+7])[1],endianness))
@@ -701,7 +703,7 @@ module DWARF
             (i,true)
         end
 
-        function evaluate_generic{T}(s::StateMachine{T},opcodes::Array{Uint8,1},getreg_func::Function,getword_func,endianness::Symbol)
+        function evaluate_generic{T}(s::StateMachine{T},opcodes::Array{UInt8,1},getreg_func::Function,getword_func,endianness::Symbol)
             i=1
             while true
                 i,res = evaluate_generic_instruction(s,opcodes,i,getreg_func,getword_func,endianness)
@@ -753,7 +755,7 @@ module DWARF
             i::T
         end
 
-        function evaluate_simple_location{T}(s::StateMachine{T},opcodes::Array{Uint8,1},getreg_func::Function,getword_func,endianness::Symbol)
+        function evaluate_simple_location{T}(s::StateMachine{T},opcodes::Array{UInt8,1},getreg_func::Function,getword_func,endianness::Symbol)
             i=1
             opcode = opcodes[i]
             if opcode >= DWARF.DW_OP_reg0 && opcode <= DWARF.DW_OP_reg31
@@ -779,14 +781,14 @@ module DWARF
 
         immutable HeaderStub{T}
             length::T
-            version::Uint16
+            version::UInt16
             header_length::T
-            minimum_instruction_length::Uint8
-            maximum_operations_per_instruction::Uint8
-            default_is_stmt::Uint8
+            minimum_instruction_length::UInt8
+            maximum_operations_per_instruction::UInt8
+            default_is_stmt::UInt8
             line_base::Int8
             line_range::Int8
-            opcode_base::Uint8
+            opcode_base::UInt8
         end
 
         immutable FileEntry
@@ -809,31 +811,31 @@ module DWARF
         end
 
         function unpack(io,::Type{HeaderStub})
-            T = Uint32
+            T = UInt32
             length = read(io,T)
             if length == 0xffffffff
-                T = Uint64
+                T = UInt64
                 length = read(io,T)
             end
-            version = read(io,Uint16)
+            version = read(io,UInt16)
             header_length = read(io,T)
-            minimum_instruction_length = read(io,Uint8)
-            maximum_operations_per_instruction = version >= 4 ? read(io,Uint8) : 1
+            minimum_instruction_length = read(io,UInt8)
+            maximum_operations_per_instruction = version >= 4 ? read(io,UInt8) : 1
             HeaderStub{T}(length,version,header_length,minimum_instruction_length,maximum_operations_per_instruction,
-                read(io,Uint8),read(io,Int8),read(io,Int8),read(io,Uint8))
+                read(io,UInt8),read(io,Int8),read(io,Int8),read(io,UInt8))
         end
 
         immutable Header{T}
             stub::HeaderStub{T}
-            standard_opcode_lengths::Vector{Uint8}
+            standard_opcode_lengths::Vector{UInt8}
             include_directories::Vector{UTF8String}
             file_names::Vector{FileEntry}
         end
 
         function readstring(io)
-            ret = Array(Uint8,0)
+            ret = Array(UInt8,0)
             while true
-                c = read(io,Uint8)
+                c = read(io,UInt8)
                 c == 0 && break
                 push!(ret,c)
             end
@@ -842,7 +844,7 @@ module DWARF
 
         function read_header(io)
             stub = unpack(io,HeaderStub)
-            standard_opcode_lengths = Array(Uint8,stub.opcode_base-1)
+            standard_opcode_lengths = Array(UInt8,stub.opcode_base-1)
             read(io,standard_opcode_lengths)
             include_directories = UTF8String[]
             while true
@@ -933,12 +935,12 @@ module DWARF
         end
 
         function step(io,m::StateMachine)
-            op = read(io,Uint8)
+            op = read(io,UInt8)
             if op == 0
                 # Extended opcode
                 pos = position(io)
                 size::BigInt = read(io,ULEB128)
-                ex_op = read(io,Uint8)
+                ex_op = read(io,UInt8)
                 if ex_op == DWARF.DW_LNE_end_sequence
                     m.state = RegisterState(m.state,end_sequence = true)
                     ret = (true,m.state)
@@ -948,9 +950,9 @@ module DWARF
                 elseif ex_op == DWARF.DW_LNE_set_address
                     addrsize = pos+size - position(io) + 1
                     if addrsize == 4
-                        m.state = RegisterState(m.state,address = read(io,Uint32))
+                        m.state = RegisterState(m.state,address = read(io,UInt32))
                     elseif addrsize == 8
-                        m.state = RegisterState(m.state,address = read(io,Uint64))
+                        m.state = RegisterState(m.state,address = read(io,UInt64))
                     else
                         error("Unsupported target address size $addrsize")
                     end
@@ -1015,7 +1017,7 @@ module DWARF
                         error("Malformed Instruction")
                     end
                     m.state = RegisterState(m.state,
-                        address = m.state.address + read(io,Uint16),
+                        address = m.state.address + read(io,UInt16),
                         op_index = 0)
                 elseif op == DWARF.DW_LNS_set_prologue_end
                     if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_prologue_end] != 0
@@ -1069,10 +1071,10 @@ module DWARF
 
         function start(x::LineTable)
             # The header length is the number of bytes after the header length
-            # The fields from the start are length (header_type), version (Uint16) and header_length(header_type)
-            # plus an additional Uint32 if the header_type is Uint64
-            seek(x.io,x.start + x.header.stub.header_length + 2*sizeof(header_type(x.header)) + sizeof(Uint16) +
-                (header_type(x.header) == Uint64 ? sizeof(Uint32) : 0))
+            # The fields from the start are length (header_type), version (UInt16) and header_length(header_type)
+            # plus an additional UInt32 if the header_type is UInt64
+            seek(x.io,x.start + x.header.stub.header_length + 2*sizeof(header_type(x.header)) + sizeof(UInt16) +
+                (header_type(x.header) == UInt64 ? sizeof(UInt32) : 0))
             StateMachine(x.header,RegisterState(x.header.stub.default_is_stmt > 0))
         end
         next(x::LineTable,m::StateMachine) = (state_step(x.io,m),m)
@@ -1114,7 +1116,7 @@ module DWARF
     immutable LocationListEntry{T}
         first::T
         last::T
-        data::Array{Uint8,1}
+        data::Array{UInt8,1}
     end
 
     immutable LocationList{T}
@@ -1143,7 +1145,7 @@ module DWARF
     const DEBUG_SECTIONS = ObjFileBase.DEBUG_SECTIONS
 
     @struct immutable InitialLength
-        val::Uint32
+        val::UInt32
     end
 
     for (t,t32,t64) in ((:(DWARF.DWARFCUHeader),:(DWARF32.CUHeader),:(DWARF32.CUHeader)),
@@ -1176,13 +1178,13 @@ module DWARF
         if size == 0
             return Zero
         elseif size == 1
-            return Uint8
+            return UInt8
         elseif size == 2
-            return Uint16
+            return UInt16
         elseif size == 4
-            return Uint32
+            return UInt32
         elseif size == 8
-            return Uint64
+            return UInt64
         elseif size == 16
             return Uint128
         else
@@ -1199,7 +1201,7 @@ module DWARF
         sets::Array{ARTableSet,1}
     end
 
-    const dummy_dict = Dict{None,Array{Integer,1}}() #Since we don't have StrPack support for Parametric types
+    const dummy_dict = Dict{Union{},Array{Integer,1}}() #Since we don't have StrPack support for Parametric types
 
     # aranges tables
     function read(io::IO,::Type{ARTableSet},endianness::Symbol)
@@ -1255,7 +1257,7 @@ module DWARF
     immutable AbbrevTableEntry
         code::ULEB128
         tag::ULEB128
-        has_children::Uint8
+        has_children::UInt8
         attributes::Array{AttributeSpecification,1}
     end
 
@@ -1268,7 +1270,7 @@ module DWARF
         code = read(io,ULEB128)
         if code != 0
             tag = read(io,ULEB128)
-            has_children = read(io,Uint8)
+            has_children = read(io,UInt8)
             ret = AbbrevTableEntry(code,tag,has_children,Array(AttributeSpecification,0))
             while true
                 e = read(io,AttributeSpecification,endianness)
@@ -1372,7 +1374,7 @@ module DWARF
     zero(::Type{DIETreeNode}) = zero_node
     zero(::Type{DIETree}) = DIETree(DIETreeNode[])
 
-    function read(io::IO,header::DWARFCUHeader,ats::AbbrevTableSet,parent::Union(DIETree,DIETreeNode),::Type{DIETreeNode},endianness::Symbol)
+    function read(io::IO,header::DWARFCUHeader,ats::AbbrevTableSet,parent::Union{DIETree,DIETreeNode},::Type{DIETreeNode},endianness::Symbol)
         num = read(io,ULEB128)
         if num != 0
             ae = ats.entries[num.val]
