@@ -1,13 +1,15 @@
-
+VERSION >= v"0.4.0-dev+6641" && __precompile__()
 module DWARF
     using ObjFileBase
     using StrPack
-    __init__() = @__struct_init__
+    using AbstractTrees
 
     include("constants.jl")
 
     import Base: read, write, zero, bswap, isequal, show, print, hash, ==
+    import Base: start, next, done
 
+    import AbstractTrees: children, printnode
 
     abstract DWARFHeader
     abstract DWARFCUHeader <: DWARFHeader # Compilation Unit Header
@@ -24,7 +26,6 @@ module DWARF
     module DWARF32
         using DWARF
         using StrPack
-        __init__() = @__struct_init__
 
         @struct immutable CUHeader <: DWARF.DWARFCUHeader
             unit_length::UInt32
@@ -72,7 +73,6 @@ module DWARF
     module DWARF64
         using DWARF
         using StrPack
-        __init__() = @__struct_init__
 
         @struct immutable CUHeader <: DWARF.DWARFCUHeader
             unit_length::UInt64
@@ -261,7 +261,9 @@ module DWARF
         import DWARF
         import DWARF: ULEB128, SLEB128, attr_color, fix_endian, DW_AT
         using ObjFileBase
+        using AbstractTrees
         import ObjFileBase: strtab_lookup
+        import AbstractTrees: printnode
 
         import Base: isequal, read, show, bytestring, ==
         export AttributeSpecification, Attribute, GenericStringAttribute,
@@ -312,19 +314,20 @@ module DWARF
             content::Array{UInt8,1}
         end
 
-        function show(io::IO, x::AddressAttribute; indent = 0, kwargs...)
-            print_name(io, x, :AddressAttribute; indent = indent)
-            println(io, "0x",hex(x.content,2*sizeof(x.content)))
+        printnode(io::IO, x::BlockAttribute; kwargs...) =
+            print_name(io, x, :BlockAttribute)
+        function printnode(io::IO, x::AddressAttribute; kwargs...)
+            print_name(io, x, :AddressAttribute)
+            print(io, "0x",hex(x.content,2*sizeof(x.content)))
         end
 
-        function show(io::IO, x::BlockAttribute; indent = 0, kwargs...)
-            print_name(io, x, :BlockAttribute; indent = indent)
-            println(io, x.content)
-        end
-
-        function show{T}(io::IO, x::ExprLocAttribute{T}; indent = 0, kwargs...)
-            print_name(io, x, :ExprLocAttribute; indent = indent)
+        function printnode{T}(io::IO, x::ExprLocAttribute{T}; kwargs...)
+            print_name(io, x, :ExprLocAttribute; kwargs...)
             DWARF.Expressions.print_expression(io,T,x.content,:NativeEndian)
+        end
+
+        function show(io::IO, x::GenericAttribute; indent = 0, kwargs...)
+            printnode(io, x; indent = indent, kwargs...)
             println(io)
         end
 
@@ -339,9 +342,9 @@ module DWARF
                     ($(attr_name))(name::ULEB128) = new(name,zero($ctype))
                     ($(attr_name))(name::ULEB128,content::$ctype) = new(name,content)
                 end
-                function Base.show(io::IO,x::$attr_name; indent = 0, kwargs...)
-                    Attributes.print_name(io, x, $(string(attr_name)); indent = indent)
-                    println(io, x.content)
+                function printnode(io::IO,x::$attr_name; kwargs...)
+                    Attributes.print_name(io, x, $(string(attr_name)); kwargs...)
+                    print(io, x.content)
                 end
                 function Base.convert{T<:Integer}(::Type{T},x::$attr_name)
                     convert(T,x.content)
@@ -375,6 +378,8 @@ module DWARF
         module DWARF32
             import DWARF.ULEB128
             using ..Attributes
+            using AbstractTrees
+            import AbstractTrees: printnode
             immutable StrTableReference <: Attributes.StrTableReference
                 name::ULEB128
                 content::UInt32
@@ -386,6 +391,8 @@ module DWARF
         module DWARF64
             import DWARF.ULEB128
             using ..Attributes
+            using AbstractTrees
+            import AbstractTrees: printnode
             immutable StrTableReference <: Attributes.StrTableReference
                 name::ULEB128
                 content::UInt64
@@ -396,24 +403,24 @@ module DWARF
         function bytestring(x::StrTableReference, strtab = nothing)
             strtab_lookup(strtab, x.content)
         end
-        function show(io::IO, x::StrTableReference; indent = 0, strtab = nothing)
-            print_name(io, x, :StrTableReference; indent = indent)
+
+        function printnode(io::IO, x::StrTableReference; kwargs...)
+            strtab = isa(io, IOContext) ? get(io, :strtab, nothing) : nothing
+            print_name(io, x, :StrTableReference; kwargs...)
             if strtab === nothing
                 print(io, ".debug_str[0x",hex(x.content,2*sizeof(x.content))"]")
             else
                 show(io, strtab_lookup(strtab, x.content))
             end
-            println(io)
         end
 
         immutable StringAttribute <: GenericStringAttribute
             name::ULEB128
             content::ASCIIString
         end
-        function show(io::IO, x::StringAttribute; indent = 0, kwargs...)
-            print_name(io, x, :StringAttribute; indent = indent)
+        function printnode(io::IO, x::StringAttribute; kwargs...)
+            print_name(io, x, :StringAttribute; kwargs...)
             show(io, x.content)
-            println(io)
         end
 
         immutable UnimplementedAttribute
@@ -1100,12 +1107,15 @@ module DWARF
     tag_name(tag) = DW_TAG[tag]
 
     showcompact(io::IO,d::DIE) = print(io,"DIE(type ",d.tag.val,", ",length(d.attributes)," Attributes)")
+    printnode(io::IO, d::DIE) = print_with_color(tag_color, io, tag_name(d.tag))
     function show(io::IO, d::DIE; indent = 0, strtab = nothing)
-        print_with_color(tag_color, io, tag_name(d.tag), "\n")
+        printnode(io, d)
+        println(io)
         for attr in d.attributes
             show(io, attr; indent = indent + 2, strtab = strtab)
         end
     end
+
 
     immutable ARTableEntry{S,T}
         segment::S
@@ -1186,7 +1196,7 @@ module DWARF
         elseif size == 8
             return UInt64
         elseif size == 16
-            return Uint128
+            return UInt128
         else
             error("Unsupported size unit $size")
         end
@@ -1346,6 +1356,16 @@ module DWARF
         children::Array{DIETreeNode,1}
         parent::DIENode
     end
+    printnode(io::IO, node::DIETreeNode) = printnode(io, node.self)
+
+    # Iterating over a DIETreeNode yields attributes, then children
+    start(x::DIETreeNode) = 1
+    function next(x::DIETreeNode,it)
+        val = (it <= length(attributes(x))) ?
+            attributes(x)[it] : x.children[it-length(attributes(x))]
+        (val, it+1)
+    end
+    done(x::DIETreeNode, it) = it > length(attributes(x)) + length(x.children)
 
     tag(x::DIETreeNode) = tag(x.self)
     attributes(x::DIETreeNode) = attributes(x.self)
@@ -1353,6 +1373,7 @@ module DWARF
     type DIETree <: DIENode
         children::Array{DIETreeNode,1}
     end
+    children(x::DIETree) = x.children
 
     showcompact(io::IO,node::DIETreeNode) = (print(io,"DIETreeNode(");showcompact(io,node.self);print(io,", ",length(node.children)," children)"))
     showcompact(io::IO,node::DIETree) = print(io,"DIETree(",length(node.children)," children)")

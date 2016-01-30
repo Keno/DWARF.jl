@@ -1,12 +1,17 @@
-import ObjFileBase: Section, DebugSections, endianness
+import ObjFileBase: Section, DebugSections, endianness, deref
 import Base: start, next, done
 export DIETrees
+
+import AbstractTrees: print_tree
 
 immutable DIETreeRef
     oh
     strtab
     tree
 end
+deref(ref::DIETreeRef) = ref.tree
+children(ref::DIETreeRef) = children(ref.tree)
+printnode(io::IO, ref::DIETreeRef) = printnode(io, ref.tree)
 
 function show(io::IO, ref::DIETreeRef)
     show(io::IO, ref.tree; strtab = ref.strtab)
@@ -34,6 +39,11 @@ end
 
 immutable DIETrees
     dbgs
+end
+DIETrees(h::ObjectHandle) = DIETrees(debugsections(h))
+show(io::IO, dies::DIETrees) = print(io,"DIETrees(",dies.dbgs.oh,")")
+function print_tree(f::Function, io::IO, dies::DIETrees; kwargs...)
+    AbstractTrees._print_tree(f, IOContext(io, :strtab, load_strtab(dies.dbgs.debug_str)), dies; kwargs...)
 end
 
 start(dt::DIETrees) = 0
