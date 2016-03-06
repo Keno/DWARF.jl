@@ -273,7 +273,7 @@ module DWARF
 
         # Printing
 
-        function print_name(io, x, kind; indent = 0)
+        function print_name(io, x, kind; indent = 0, kwargs...)
             print(io," "^indent)
             if !haskey(DW_AT,x.name.val)
                 printfield_with_color(:red, io, string("Unknown ($(x.name.val))"),17; align=:left)
@@ -1384,7 +1384,7 @@ module DWARF
             show(io, child; indent = indent + 2, strtab = strtab)
         end
     end
-    function show(io::IO, tree::DIETree, strtab = nothing)
+    function show(io::IO, tree::DIETree; strtab = nothing)
         for child in tree.children
             show(io, child; strtab = strtab)
         end

@@ -14,7 +14,7 @@ children(ref::DIETreeRef) = children(ref.tree)
 printnode(io::IO, ref::DIETreeRef) = printnode(io, ref.tree)
 
 function show(io::IO, ref::DIETreeRef)
-    show(io::IO, ref.tree; strtab = ref.strtab)
+    show(IOContext(io, :strtab => ref.strtab), ref.tree)
 end
 
 function dies(oh::ObjectHandle)
@@ -137,8 +137,9 @@ function finddietreebyname(x::DebugSections, name;
     pubset = pubtable.sets[si]
     pubentry = pubset.entries[ei]
     cu = read(x.oh,deref(x.debug_info),pubset,DWARF.DWARFCUHeader)
-    d = read(x.oh,deref(x.debug_info),deref(x.debug_abbrev),pubset,pubentry,
-        cu,DWARF.DIETree)
+    DIETreeRef(x.oh, ObjFileBase.StrTab(x.debug_str),
+        read(x.oh,deref(x.debug_info),deref(x.debug_abbrev),pubset,pubentry,
+        cu,DWARF.DIETree))
 end
 
 function read(x::DebugSections, ::Type{DWARF.ARTableSet})
