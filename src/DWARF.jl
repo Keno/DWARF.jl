@@ -181,7 +181,7 @@ module DWARF
         end
     end
 
-    function decode(data::Array{UInt8,1}, offset, ::Type{ULEB128})
+    function decode(data::Array{UInt8,1}, offset, ::Type{ULEB128}, typ = ULEB128)
         v = BigInt(0)
         shift = 0
         i=0
@@ -194,10 +194,10 @@ module DWARF
             end
             shift+=7
         end
-        (offset+i,ULEB128(v))
+        (offset+i,typ(v))
     end
 
-    function decode(data::Array{UInt8,1}, offset, ::Type{SLEB128})
+    function decode(data::Array{UInt8,1}, offset, ::Type{SLEB128}, typ = SLEB128)
         v = BigInt(0)
         shift = 0
         c=0
@@ -215,7 +215,7 @@ module DWARF
             v |= -(BigInt(1)<<shift)
         end
 
-        (offset+i,SLEB128(v))
+        (offset+i,typ(v))
     end
 
     function read(io::IO, ::Type{SLEB128})
@@ -225,10 +225,10 @@ module DWARF
         while(true)
             c = read(io,UInt8)
             v |= BigInt(c&0x7f)<<shift
+            shift+=7
             if (c&0x80)==0 #is last bit
                 break
             end
-            shift+=7
         end
         if (c & 0x40) != 0
             v |= -(BigInt(1)<<shift)
@@ -385,7 +385,7 @@ module DWARF
                 content::UInt32
             end
             @Attributes.gattr DebugInfoReference Attributes.DebugInfoReference UInt32
-            @Attributes.gattr SectionOffset Attributes.GenericAttribute UInt32
+            @Attributes.gattr SectionOffset Attributes.SectionOffset UInt32
         end
 
         module DWARF64
@@ -398,7 +398,7 @@ module DWARF
                 content::UInt64
             end
             @Attributes.gattr DebugInfoReference Attributes.DebugInfoReference UInt64
-            @Attributes.gattr SectionOffset Attributes.GenericAttribute UInt64
+            @Attributes.gattr SectionOffset Attributes.SectionOffset UInt64
         end
         function bytestring(x::StrTableReference, strtab = nothing)
             strtab_lookup(strtab, x.content)
@@ -587,17 +587,17 @@ module DWARF
                 i+=8
             elseif opcode == DWARF.DW_OP_constu || opcode == DWARF.DW_OP_plus_uconst ||
                     opcode == DWARF.DW_OP_regx || opcode == DWARF.DW_OP_piece
-                (i,operand) = DWARF.decode(opcodes,i,ULEB128)
+                (i,operand) = DWARF.decode(opcodes,i,ULEB128,addr_type)
             elseif opcode == DWARF.DW_OP_consts || opcode == DWARF.DW_OP_fbreg ||
                 opcode >= DWARF.DW_OP_breg0 && opcode <= DWARF.DW_OP_breg31
-                (i,operand) = DWARF.decode(opcodes,i,SLEB128)
+                (i,operand) = DWARF.decode(opcodes,i,SLEB128,addr_type)
             elseif opcode == DWARF.DW_OP_bregx
                 (i,reg) = DWARF.decode(opcodes,i,ULEB128)
-                (i,offset) = DWARF.decode(opcodes,i,SLEB128)
+                (i,offset) = DWARF.decode(opcodes,i,SLEB128,addr_type)
                 operand = (reg,offset)
             elseif opcode == DWARF.DW_OP_bit_piece
                 (i,reg) = DWARF.decode(opcodes,i,ULEB128)
-                (i,offset) = DWARF.decode(opcodes,i,ULEB128)
+                (i,offset) = DWARF.decode(opcodes,i,ULEB128,addr_type)
                 operand = (reg,offset)
             else
                 return (i,)
@@ -605,16 +605,19 @@ module DWARF
             return (i,operand)
         end
 
-        function evaluate_generic_instruction{T}(s::StateMachine{T},opcodes,i,getreg_func::Function,getword_func,endianness::Symbol)
+        function evaluate_generic_instruction{T}(s::StateMachine{T},opcodes,i,getreg_func::Function,getword_func,addr_func,endianness::Symbol)
             opcode = opcodes[i]
             i+=1
             if opcode == DWARF.DW_OP_deref
                 push!(s.stack,getword_func(pop!(s.stack)))
-            elseif in(opcode,(DWARF.DW_OP_addr,DWARF.DW_OP_const1u,DWARF.DW_OP_const1s,DWARF.DW_OP_const2u,
+            elseif in(opcode,(DWARF.DW_OP_const1u,DWARF.DW_OP_const1s,DWARF.DW_OP_const2u,
                               DWARF.DW_OP_const2s,DWARF.DW_OP_const4u,DWARF.DW_OP_const4s,DWARF.DW_OP_const8u,
                               DWARF.DW_OP_const8s,DWARF.DW_OP_constu,DWARF.DW_OP_consts))
                 (i,val) = operands(T,opcode,opcodes,i,endianness)
                 push!(s.stack,convert(T,val))
+            elseif opcode == DWARF.DW_OP_addr
+                (i,val) = operands(T,opcode,opcodes,i,endianness)
+                push!(s.stack,addr_func(convert(T,val)))
             elseif opcode == DWARF.DW_OP_dup
                 push!(s.stack,s.stack[length(s.stack)-1])
             elseif opcode == DWARF.DW_OP_pick
@@ -699,9 +702,15 @@ module DWARF
             elseif opcode >= DWARF.DW_OP_breg0 && opcode <= DWARF.DW_OP_breg31
                 (i,offset) = operands(T,opcode,opcodes,i,endianness)
                 push!(s.stack,getreg_func(opcode-DWARF.DW_OP_breg0) + offset)
+            elseif opcode == DWARF.DW_OP_fbreg
+                (i,offset) = operands(T,opcode,opcodes,i,endianness)
+                push!(s.stack,getreg_func(opcode) + offset)
             elseif opcode == DWARF.DW_OP_bregx
                 (i,(val,offset)) = operands(T,opcode,opcodes,i,endianness)
                 push!(s.stack,getreg_func(val) + offset)
+            elseif opcode == DWARF.DW_OP_call_frame_cfa
+                push!(s.stack,getreg_func(DWARF.DW_OP_call_frame_cfa))
+                i -= 1
             elseif opcode == DWARF.DW_OP_nop
                 #NOP
             else
@@ -710,14 +719,14 @@ module DWARF
             (i,true)
         end
 
-        function evaluate_generic{T}(s::StateMachine{T},opcodes::Array{UInt8,1},getreg_func::Function,getword_func,endianness::Symbol)
+        function evaluate_generic{T}(s::StateMachine{T},opcodes::Array{UInt8,1},getreg_func::Function,getword_func,addr_func,endianness::Symbol)
             i=1
             while true
-                i,res = evaluate_generic_instruction(s,opcodes,i,getreg_func,getword_func,endianness)
+                i,res = evaluate_generic_instruction(s,opcodes,i,getreg_func,getword_func,addr_func,endianness)
                 if !res
                     error("Unrecognized Opcode ",opcodes[i])
                 end
-                if i==length(opcodes)
+                if i>=length(opcodes)
                     break
                 end
             end
@@ -762,16 +771,16 @@ module DWARF
             i::T
         end
 
-        function evaluate_simple_location{T}(s::StateMachine{T},opcodes::Array{UInt8,1},getreg_func::Function,getword_func,endianness::Symbol)
+        function evaluate_simple_location{T}(s::StateMachine{T},opcodes::Array{UInt8,1},getreg_func::Function,getword_func,addr_func,endianness::Symbol)
             i=1
             opcode = opcodes[i]
             if opcode >= DWARF.DW_OP_reg0 && opcode <= DWARF.DW_OP_reg31
                 return RegisterLocation(opcode-DWARF.DW_OP_reg0)
             elseif opcode == DWARF.DW_OP_regx
-                (i,val) = DWARF.decode(opcodes,i,ULEB128)
+                (i,val) = DWARF.decode(opcodes,i+1,ULEB128)
                 return RegisterLocation(val)
             else
-                evaluate_generic(s,opcodes,getreg_func,getword_func,endianness)
+                evaluate_generic(s,opcodes,getreg_func,getword_func,addr_func,endianness)
                 return MemoryLocation{T}(last(s.stack))
             end
         end
@@ -1104,7 +1113,9 @@ module DWARF
 
     const tag_color = :blue
 
-    tag_name(tag) = DW_TAG[tag]
+    function tag_name(tag)
+        get(DW_TAG, tag, "Unknown tag $tag")
+    end
 
     showcompact(io::IO,d::DIE) = print(io,"DIE(type ",d.tag.val,", ",length(d.attributes)," Attributes)")
     printnode(io::IO, d::DIE) = print_with_color(tag_color, io, tag_name(d.tag))
@@ -1334,7 +1345,7 @@ module DWARF
             start = read(io, T)
             last = read(io, T)
             if start == typemax(T)
-                error("Base address seclection not implemented")
+                error("Base address selection not implemented")
             elseif start == 0 && last == 0
                 break
             else
