@@ -8,7 +8,7 @@ x = IOBuffer()
 write(x,[0x47,0x00,0x00,0x00,0x02,0x00,0x2a,0x00,0x00,0x00,0x01,0x01,0xfb,0x0e,0x0d]) # 8 bytes after header length
 # opcode lengths
 standard_opcode_lengths = [0x00,0x01,0x01,0x01,0x01,0x00,0x00,0x00,0x01,0x00,0x00,0x01]
-write(x,standard_opcode_lengths) # 12 bytes 
+write(x,standard_opcode_lengths) # 12 bytes
 # include directories (11 bytes)
 write(x,"/julia/test")
 write(x,"\0")       # null terminate
@@ -26,14 +26,14 @@ write(x,[0x05,0x01,0x00,0x09,0x02,0x0e,0x30,0xec,0x2c,0x01,0x00,0x00,0x00,0x03,0
 
 seekstart(x)
 header = DWARF.LineTableSupport.read_header(x)
-@test header.stub == DWARF.LineTableSupport.HeaderStub{Uint32}(
+@test header.stub == DWARF.LineTableSupport.HeaderStub{UInt32}(
     0x47, # Total Length
     0x02, # Version
     0x2a, # Header Length (bytes after this point)
     0x01, # minimum_instruction_length
     0x01, # maximum_operations_per_instruction (implicit it DWARF version 2)
     0x01, # default_is_stmt
-    0xfb, # line_base
+    reinterpret(Int8, 0xfb), # line_base
     0x0e, # line_range
     0x0d) # opcode_base
 

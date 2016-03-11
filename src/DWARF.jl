@@ -861,7 +861,7 @@ module DWARF
         function read_header(io)
             stub = unpack(io,HeaderStub)
             standard_opcode_lengths = Array(UInt8,stub.opcode_base-1)
-            read(io,standard_opcode_lengths)
+            read!(io,standard_opcode_lengths)
             include_directories = UTF8String[]
             while true
                 s = readstring(io)
