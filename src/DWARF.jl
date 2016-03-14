@@ -553,6 +553,8 @@ module DWARF
 
         type StateMachine{T}
             stack::Array{T,1}
+            StateMachine(stack::Array{T,1}) = new(stack)
+            StateMachine() = new(T[])
         end
 
         function operands(addr_type,opcode,opcodes,i,endianness)
@@ -590,7 +592,7 @@ module DWARF
                 (i,operand) = DWARF.decode(opcodes,i,ULEB128,addr_type)
             elseif opcode == DWARF.DW_OP_consts || opcode == DWARF.DW_OP_fbreg ||
                 opcode >= DWARF.DW_OP_breg0 && opcode <= DWARF.DW_OP_breg31
-                (i,operand) = DWARF.decode(opcodes,i,SLEB128,addr_type)
+                (i,operand) = DWARF.decode(opcodes,i,SLEB128,typeof(signed(addr_type(0))))
             elseif opcode == DWARF.DW_OP_bregx
                 (i,reg) = DWARF.decode(opcodes,i,ULEB128)
                 (i,offset) = DWARF.decode(opcodes,i,SLEB128,addr_type)
@@ -704,7 +706,8 @@ module DWARF
                 push!(s.stack,getreg_func(opcode-DWARF.DW_OP_breg0) + offset)
             elseif opcode == DWARF.DW_OP_fbreg
                 (i,offset) = operands(T,opcode,opcodes,i,endianness)
-                push!(s.stack,getreg_func(opcode) + offset)
+                val = getreg_func(opcode)
+                push!(s.stack,val + offset%UInt64)
             elseif opcode == DWARF.DW_OP_bregx
                 (i,(val,offset)) = operands(T,opcode,opcodes,i,endianness)
                 push!(s.stack,getreg_func(val) + offset)
