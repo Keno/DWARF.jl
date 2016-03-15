@@ -26,15 +26,19 @@ function dies(oh::ObjectHandle)
     end
 end
 
-read{T<:ObjectHandle}(oh::T,::Type{DWARF.DIETree}; dbgs = debugsections(oh)) = read(dbgs, DIETree)
-function read(dbgs::DebugSections,::Type{DWARF.DIETree}, offset = 0)
-    seek(dbgs.oh, ObjFileBase.sectionoffset(dbgs.debug_info)+offset)
-    s = read(dbgs.oh, DWARF.DWARFCUHeader)
+function _read_tree(dbgs, s)
     pos = position(dbgs.oh)
     abbrev = read(dbgs.oh, ObjFileBase.deref(dbgs.debug_abbrev), s, DWARF.AbbrevTableSet)
     seek(dbgs.oh, pos)
     DIETree = read(dbgs.oh, s, abbrev, zero(DWARF.DIETree), DWARF.DIETreeNode, endianness(dbgs.oh));
     DIETree
+end
+
+read{T<:ObjectHandle}(oh::T,::Type{DWARF.DIETree}; dbgs = debugsections(oh)) = read(dbgs, DIETree)
+function read(dbgs::DebugSections,::Type{DWARF.DIETree}, offset = 0)
+    seek(dbgs.oh, ObjFileBase.sectionoffset(dbgs.debug_info)+offset)
+    s = read(dbgs.oh, DWARF.DWARFCUHeader)
+    _read_tree(dbgs, s)
 end
 
 immutable DIETrees
@@ -119,27 +123,77 @@ function findindexbyname(x::DebugSections,name;
     return (0,0)
 end
 
-function findcubyname(x::DebugSections, name;
-    pubtable = read(x.oh, deref(x.debug_pubnames), DWARF.PUBTable))
+function findcubyname(x::DebugSections, pubtable::DWARF.PUBTable, name)
     (si,ei) = findindexbyname(x, name; pubtable = pubtable)
     if si == ei == 0
         error("Not Found")
     end
-    read(x.oh,deref(x.debug_info),pubtable.sets[si],DWARF.DWARFCUHeader)
+    s = read(x.oh,deref(x.debug_info),pubtable.sets[si],DWARF.DWARFCUHeader)
+    _read_tree(x, s)
 end
 
-function finddietreebyname(x::DebugSections, name;
-    pubtable = read(x.oh, deref(x.debug_pubnames), DWARF.PUBTable))
-    (si,ei) = findindexbyname(x, name; pubtable = pubtable)
-    if si == ei == 0
-        error("Not Found")
+function searchcuspbyname(x::DebugSections, name)
+    trees = DIETrees(x)
+    strtab = load_strtab(x.debug_str)
+    for tree in trees
+        for child in children(tree)
+            if tag(child) == DW_TAG_subprogram
+                for at in attributes(child)
+                    if tag(at) == DW_AT_name
+                        if bytestring(at, strtab) == name
+                            return (tree,child)
+                        end
+                    end
+                end
+            end
+        end
     end
+    error("Not found")
+end
+
+function findcubyname(x::DebugSections, name)
+    if x.debug_pubnames != nothing
+        findcubyname(x, read(x.oh, deref(x.debug_pubnames), DWARF.PUBTable), name)
+    else
+        searchcuspbyname(x, name)[1]
+    end
+end
+
+function finddietreebyname(x::DebugSections, pubtable::DWARF.PUBTable, name)
+    (si,ei) = findindexbyname(x, name; pubtable = pubtable)
+    (si == ei == 0) && error("Not Found")
     pubset = pubtable.sets[si]
     pubentry = pubset.entries[ei]
     cu = read(x.oh,deref(x.debug_info),pubset,DWARF.DWARFCUHeader)
     DIETreeRef(x.oh, ObjFileBase.StrTab(x.debug_str),
         read(x.oh,deref(x.debug_info),deref(x.debug_abbrev),pubset,pubentry,
         cu,DWARF.DIETree))
+end
+
+function findcuspbyname(x::DebugSections, name)
+    if x.debug_pubnames != nothing
+        pubtable = read(x.oh, deref(x.debug_pubnames), DWARF.PUBTable)
+        (si,ei) = findindexbyname(x, name; pubtable = pubtable)
+        (si == ei == 0) && error("Not Found")
+        pubset = pubtable.sets[si]
+        pubentry = pubset.entries[ei]
+        cu = read(x.oh,deref(x.debug_info),pubset,DWARF.DWARFCUHeader)
+        cutree = _read_tree(x, cu)
+        sptree = DIETreeRef(x.oh, ObjFileBase.StrTab(x.debug_str),
+            read(x.oh,deref(x.debug_info),deref(x.debug_abbrev),pubset,pubentry,
+            cu,DWARF.DIETree))
+        return (cutree, sptree)
+    else
+        searchcuspbyname(x, name)
+    end
+end
+
+function finddietreebyname(x::DebugSections, name)
+    if x.debug_pubnames != nothing
+        finddietreebyname(x, read(x.oh, deref(x.debug_pubnames), DWARF.PUBTable), name)
+    else
+        searchcuspbyname(x, name)[2]
+    end
 end
 
 function read(x::DebugSections, ::Type{DWARF.ARTableSet})

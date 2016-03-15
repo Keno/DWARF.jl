@@ -151,7 +151,7 @@ module DWARF
     ==(a::LEB128,b::Integer) = isequal(a.val, b)
     ==(a::Integer,b::LEB128) = isequal(b, a.val)
     Base.zero{T<:LEB128}(::Type{T}) = convert(T,0)
-
+    Base.hex(x::LEB128) = hex(x.val)
 
     function read(io::IO, ::Type{ULEB128})
         v = BigInt(0)
@@ -317,7 +317,7 @@ module DWARF
         printnode(io::IO, x::BlockAttribute; kwargs...) =
             print_name(io, x, :BlockAttribute)
         function printnode(io::IO, x::AddressAttribute; kwargs...)
-            print_name(io, x, :AddressAttribute)
+            print_name(io, x, :AddressAttribute; kwargs...)
             print(io, "0x",hex(x.content,2*sizeof(x.content)))
         end
 
@@ -797,6 +797,7 @@ module DWARF
 
         import ..ULEB128, ..SLEB128, ..DWARF
         import Base: ==
+        using ObjFileBase: printfield
 
         immutable HeaderStub{T}
             length::T
@@ -946,14 +947,19 @@ module DWARF
                     mod(m.state.op_index + op_adv,m.header.stub.maximum_operations_per_instruction))
         end
 
-        function pcl_adv!(m::StateMachine,op)
+        function pcl_adv!(m::StateMachine,op; advance_line = true)
             adj_opc = op - m.header.stub.opcode_base
             pc_adv!(m,div(adj_opc,m.header.stub.line_range))
-            m.state = RegisterState(m.state,
-                line = m.state.line + m.header.stub.line_base + mod(adj_opc,m.header.stub.line_range))
+            if advance_line
+                m.state = RegisterState(m.state,
+                    line = m.state.line + m.header.stub.line_base + mod(adj_opc,m.header.stub.line_range))
+            end
         end
 
-        function step(io,m::StateMachine)
+        const DW_LNE_special_adv = 0x80
+        const DW_LNS_OFF = 0x20
+
+        function decode_next(io, header)
             op = read(io,UInt8)
             if op == 0
                 # Extended opcode
@@ -961,109 +967,116 @@ module DWARF
                 size::BigInt = read(io,ULEB128)
                 ex_op = read(io,UInt8)
                 if ex_op == DWARF.DW_LNE_end_sequence
-                    m.state = RegisterState(m.state,end_sequence = true)
-                    ret = (true,m.state)
-                    m.state = RegisterState(m.header.stub.default_is_stmt > 0)
                     position(io) > pos+size+1 && error("Malformed extended instruction")
-                    return ret
+                    return (DW_LNS_OFF+ex_op,())
                 elseif ex_op == DWARF.DW_LNE_set_address
                     addrsize = pos+size - position(io) + 1
                     if addrsize == 4
-                        m.state = RegisterState(m.state,address = read(io,UInt32))
+                        return (DW_LNS_OFF+ex_op,(read(io,UInt32),))
                     elseif addrsize == 8
-                        m.state = RegisterState(m.state,address = read(io,UInt64))
+                        return (DW_LNS_OFF+ex_op,(read(io,UInt64),))
                     else
                         error("Unsupported target address size $addrsize")
                     end
                 elseif ex_op == DWARF.DW_LNE_define_file
-                    push!(m.file_names,read(io,FileEntry))
+                    return (DW_LNS_OFF+ex_op,(read(io,FileEntry),))
                 elseif ex_op == DWARF.DW_LNE_set_discriminator
-                    m.state = RegisterState(m.state,discriminator = read(io,ULEB128))
+                    return (DW_LNS_OFF+ex_op,(read(io,ULEB128),))
                 else
                     error("Unrecognized extended opcode $ex_op")
                 end
                 position(io) > pos+size+1 && error("Malformed extended instruction (op=$ex_op, pos=$pos, size=$size, iopos=$(position(io)))")
-            elseif op < m.header.stub.opcode_base
+            elseif op < header.stub.opcode_base
                 # standard opcode
-                if op == DWARF.DW_LNS_copy
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_copy] != 0
+                if op == DWARF.DW_LNS_copy || op == DWARF.DW_LNS_negate_stmt || op == DWARF.DW_LNS_set_basic_block ||
+                        op == DWARF.DW_LNS_const_add_pc || op == DWARF.DW_LNS_set_prologue_end ||
+                        op == DWARF.DW_LNS_set_epilogue_begin
+                    if header.standard_opcode_lengths[op] != 0
                         error("Malformed Instruction")
                     end
-                    ret = (true,m.state)
-                    m.state = RegisterState(m.state,
-                        discriminator = 0,
-                        basic_block = false,
-                        prologue_end = false,
-                        epilogue_begin = false)
-                    return ret
-                elseif op == DWARF.DW_LNS_advance_pc
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_advance_pc] != 1
+                    return (op,())
+                elseif op == DWARF.DW_LNS_advance_pc || op == DWARF.DW_LNS_set_column || op == DWARF.DW_LNS_set_file ||
+                        op == DWARF.DW_LNS_set_isa
+                    if header.standard_opcode_lengths[op] != 1
                         error("Malformed Instruction")
                     end
-                    pc_adv!(m,read(io,ULEB128).val)
+                    return (op,(read(io,ULEB128),))
                 elseif op == DWARF.DW_LNS_advance_line
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_advance_line] != 1
+                    if header.standard_opcode_lengths[op] != 1
                         error("Malformed Instruction")
                     end
-                    m.state = RegisterState(m.state,line = m.state.line + read(io,SLEB128).val)
-                elseif op == DWARF.DW_LNS_set_file
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_file] != 1
-                        error("Malformed Instruction")
-                    end
-                    m.state = RegisterState(m.state,line = read(io,ULEB128))
-                elseif op == DWARF.DW_LNS_set_column
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_column] != 1
-                        error("Malformed Instruction")
-                    end
-                    m.state = RegisterState(m.state,column = read(io,ULEB128))
-                elseif op == DWARF.DW_LNS_negate_stmt
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_negate_stmt] != 0
-                        error("Malformed Instruction")
-                    end
-                    m.state = RegisterState(m.state,is_stmt = !m.state.is_stmt)
-                elseif op == DWARF.DW_LNS_set_basic_block
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_basic_block] != 0
-                        error("Malformed Instruction")
-                    end
-                    m.state = RegisterState(m.state,basic_block = true)
-                elseif op == DWARF.DW_LNS_const_add_pc
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_const_add_pc] != 0
-                        error("Malformed Instruction")
-                    end
-                    pc_adv!(m,255)
+                    return (op,(read(io,SLEB128),))
                 elseif op == DWARF.DW_LNS_fixed_advance_pc
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_fixed_advance_pc] != 1
+                    if header.standard_opcode_lengths[op] != 1
                         error("Malformed Instruction")
                     end
-                    m.state = RegisterState(m.state,
-                        address = m.state.address + read(io,UInt16),
-                        op_index = 0)
-                elseif op == DWARF.DW_LNS_set_prologue_end
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_prologue_end] != 0
-                        error("Malformed Instruction")
-                    end
-                    m.state = RegisterState(m.state, prologue_end = false)
-                elseif op == DWARF.DW_LNS_set_epilogue_begin
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_epilogue_begin] != 0
-                        error("Malformed Instruction")
-                    end
-                    m.state = RegisterState(m.state, epilogue_begin = false)
-                elseif op == DWARF.DW_LNS_set_epilogue_begin
-                    if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_epilogue_begin] != 0
-                        error("Malformed Instruction")
-                    end
-                    m.state = RegisterState(m.state, isa = read(io,ULEB128))
+                    return (op,(read(io,UInt16),))
+                else
+                    error("Unknown opcode")
                 end
             else
                 # special opcode
-                # standard actions
+                # decode the opcode
+                return (DW_LNE_special_adv,(op,))
+            end
+        end
+
+        function step(io,m::StateMachine)
+            opcode, operands = decode_next(io, m.header)
+            if opcode == DW_LNS_OFF+DWARF.DW_LNE_end_sequence
+                m.state = RegisterState(m.state,end_sequence = true)
+                ret = (true,m.state)
+                m.state = RegisterState(m.header.stub.default_is_stmt > 0)
+                return ret
+            elseif opcode == DW_LNS_OFF+DWARF.DW_LNE_set_address
+                m.state = RegisterState(m.state,address = operands[1])
+            elseif opcode == DW_LNS_OFF+DWARF.DW_LNE_define_file
+                push!(m.file_names,operands[1])
+            elseif opcode == DW_LNS_OFF+DWARF.DW_LNE_set_discriminator
+                m.state = RegisterState(m.state,discriminator = operands[1])
+            elseif opcode == DWARF.DW_LNS_copy
+                ret = (true,m.state)
                 m.state = RegisterState(m.state,
+                    discriminator = 0,
                     basic_block = false,
                     prologue_end = false,
-                    epilogue_begin = false,
+                    epilogue_begin = false)
+                return ret
+            elseif opcode == DWARF.DW_LNS_advance_pc
+                pc_adv!(m,operands[1].val)
+            elseif opcode == DWARF.DW_LNS_advance_line
+                m.state = RegisterState(m.state,line = m.state.line + operands[1].val)
+            elseif opcode == DWARF.DW_LNS_set_file
+                m.state = RegisterState(m.state,line = operands[1])
+            elseif opcode == DWARF.DW_LNS_set_column
+                m.state = RegisterState(m.state,column = operands[1])
+            elseif opcode == DWARF.DW_LNS_negate_stmt
+                m.state = RegisterState(m.state,is_stmt = !m.state.is_stmt)
+            elseif opcode == DWARF.DW_LNS_set_basic_block
+                m.state = RegisterState(m.state,basic_block = true)
+            elseif opcode == DWARF.DW_LNS_const_add_pc
+                pcl_adv!(m,255; advance_line = false)
+            elseif opcode == DWARF.DW_LNS_fixed_advance_pc
+                m.state = RegisterState(m.state,
+                    address = m.state.address + operands[1],
+                    op_index = 0)
+            elseif opcode == DWARF.DW_LNS_set_prologue_end
+                if m.header.standard_opcode_lengths[DWARF.DW_LNS_set_prologue_end] != 0
+                    error("Malformed Instruction")
+                end
+                m.state = RegisterState(m.state, prologue_end = false)
+            elseif opcode == DWARF.DW_LNS_set_epilogue_begin
+                m.state = RegisterState(m.state, epilogue_begin = false)
+            elseif opcode == DWARF.DW_LNS_set_isa
+                m.state = RegisterState(m.state, isa = operands[1])
+            elseif opcode == DW_LNE_special_adv
+                pcl_adv!(m,operands[1])
+                ret = (true, m.state)
+                m.state = RegisterState(m.state, basic_block = false, prologue_end = false, epilogue_begin = false,
                     discriminator = 0)
-                # decode the opcode
-                pc_adv!(m,op)
+                return ret
+            else
+                error("Unhandled opcode")
             end
             return (false,m.state)
         end
@@ -1084,6 +1097,50 @@ module DWARF
             start::Int
             LineTable(io,header,start) = new(io,header,start)
             LineTable(io) = (pos=position(io);new(io,read_header(io),pos))
+        end
+
+        function dump_program(out::IO, x::LineTable)
+            seek(x.io,x.start + x.header.stub.header_length + 2*sizeof(header_type(x.header)) + sizeof(UInt16) +
+                (header_type(x.header) == UInt64 ? sizeof(UInt32) : 0))
+            while position(x.io) <= (x.start + x.header.stub.length)
+                opcode, operands = decode_next(x.io, x.header)
+                print_with_color(:blue, out, opcode == DW_LNE_special_adv ? "DW_LNE_special_adv" :
+                    opcode > DW_LNS_OFF ? DWARF.DW_LNE[opcode-DW_LNS_OFF] : DWARF.DW_LNS[opcode])
+                for operand in operands
+                    print(out, ' ')
+                    if opcode == DWARF.DW_LNE_set_address+DW_LNS_OFF
+                        print(out, "0x", hex(operand))
+                    elseif isa(operand, ULEB128) || isa(operand, SLEB128)
+                        print(out, operand.val)
+                    else
+                        print(out, operand)
+                    end
+                end
+                println(out)
+            end
+        end
+
+        function Base.showcompact(io::IO, state::RegisterState)
+            printfield(io, string("0x",hex(state.address)), 18); print(io,' ')
+            printfield(io, state.line, 6); print(io,' ')
+            printfield(io, state.column, 6); print(io,' ')
+            printfield(io, state.file, 6); print(io,' ')
+            printfield(io, state.isa, 3); print(io,' ')
+            printfield(io, state.discriminator, 13, align = :right); print(io,' ')
+            state.is_stmt && print(io, "is_stmt ")
+            state.end_sequence && print(io, "end_sequence ")
+            state.prologue_end && print(io, "prologue_end ")
+            state.epilogue_begin && print(io, "epilogue_begin ")
+            println(io)
+        end
+
+        # Follow llvm-dwarfdump format
+        function dump_table(io::IO, x::LineTable)
+            println(io, "Address            Line   Column File   ISA Discriminator Flags")
+            println(io, "------------------ ------ ------ ------ --- ------------- -------------")
+            for state in x
+                showcompact(io, state)
+            end
         end
 
         import Base: start, next, done
