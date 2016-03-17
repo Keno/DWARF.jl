@@ -107,7 +107,7 @@ function read{T<:ObjectHandle,S}(oh::T,
     ats = read(oh,debug_abbrev,header,DWARF.AbbrevTableSet)
     seek(oh,sectionoffset(debug_info)+s.header.debug_info_offset+e.offset)
     ret = DWARF.DIETree(Array(DWARF.DIETreeNode,0))
-    read(oh,header,ats,ret,DWARF.DIETreeNode,:LittleEndian)
+    read(oh,header,ats,ret,DWARF.DIETreeNode, endianness(oh))
     ret
 end
 
@@ -145,6 +145,30 @@ function searchcuspbyname(x::DebugSections, name)
                         end
                     end
                 end
+            end
+        end
+    end
+    error("Not found")
+end
+
+function searchcuspbyip(x::DebugSections, ip)
+    ref(tree) = DIETreeRef(x.oh, ObjFileBase.StrTab(x.debug_str),tree)
+    trees = DIETrees(x)
+    strtab = load_strtab(x.debug_str)
+    for tree in trees
+        for child in children(tree)
+            if tag(child) == DW_TAG_subprogram
+                low = 0
+                high = 0
+                for at in attributes(child)
+                    if tag(at) == DW_AT_low_pc
+                        low = convert(UInt,at)
+                    elseif tag(at) == DW_AT_high_pc
+                        high = isa(at, AddressAttribute) ? convert(UInt, at) :
+                            low + convert(UInt, at)
+                    end
+                end
+                (low <= ip < high) && return (ref(tree),ref(child))
             end
         end
     end
