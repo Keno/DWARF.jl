@@ -1,4 +1,4 @@
-VERSION >= v"0.4.0-dev+6641" && __precompile__()
+#VERSION >= v"0.4.0-dev+6641" && __precompile__()
 module DWARF
     using ObjFileBase
     using AbstractTrees
@@ -133,6 +133,7 @@ module DWARF
 
     Base.convert{T<:LEB128}(::Type{T},x::Int64) = T(big(x))
     Base.convert{T<:LEB128}(::Type{BigInt},x::T) = x.val
+    Base.convert{T<:Integer, S<:LEB128}(::Type{T}, x::S) = convert(T,x.val)
 
     immutable ULEB128 <: LEB128
         val::BigInt
@@ -453,6 +454,33 @@ module DWARF
             ImplicitFlag,           # DW_FORM_flag_present
             UnimplementedAttribute  # DW_FORM_ref_sig8
         ]
+
+        function sizeof_form(form, cu)
+            if form == DWARF.DW_FORM_addr
+                return sizeof(DWARF.size_to_inttype(cu.address_size))
+            elseif form == DWARF.DW_FORM_ref_addr || form == DWARF.DW_FORM_sec_offset ||
+                    form == DWARF.DW_FORM_strp
+                return sizeof(typeof(cu.unit_length))
+            elseif form == DWARF.DW_FORM_flag_present
+                return 0
+            elseif form == DWARF.DW_FORM_block1 || form == DWARF.DW_FORM_data1 ||
+                    form == DWARF.DW_FORM_ref1
+                return 1
+            elseif form == DWARF.DW_FORM_block2 || form == DWARF.DW_FORM_data2 ||
+                    form == DWARF.DW_FORM_ref2
+                return 2
+            elseif form == DWARF.DW_FORM_block4 || form == DWARF.DW_FORM_ref4 ||
+                    form == DWARF.DW_FORM_data4
+                return 4
+            elseif form == DWARF.DW_FORM_ref8 || form == DWARF.DW_FORM_data8
+                return 8
+            elseif form == DWARF.DW_FORM_flag || form == DWARF.DW_FORM_sdata ||
+                    form == DWARF.DW_FORM_udata
+                error("$(DWARF.DW_FORM[form]) does not have a fixed size")
+            else
+                error("Unknown form $(DWARF.DW_FORM[form])")
+            end
+        end
 
         function form2gattrT(form::ULEB128)
             mapping = form_mapping[form.val]

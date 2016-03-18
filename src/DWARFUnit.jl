@@ -1,16 +1,25 @@
 import Base: start, next, done
+using ObjFileBase: handle
 
 # Iterate over units in a section
 immutable UnitIterator{T}
     section::SectionRef
 end
-start(x::UnitIterator) = 0
+start(x::UnitIterator) = sectionoffset(x.section)
 function next{T}(x::UnitIterator{T}, offset)
-    seek(x.section, offset)
-    ret = read(handle(x.section).io, T)
-    (ret, position(x.section) + ret.unit_length + (sizeof(ret) - sizeof(ret.unit_length)))
+    io = handle(x.section).io
+    seek(io, offset)
+    ret = read(io, T)
+    @show typeof(ret)
+    @show offset + sizeof(ret)
+    next_offset = offset + ret.unit_length + sizeof(ret) +
+        (isa(ret.unit_length, UInt64) ? sizeof(UInt32) : 0)
+    @show offset
+    @show ret
+    @show next_offset
+    (ret, next_offset)
 end
-done(x::UnitIterator, off) = x >= sectionsize(x.section)
+done(x::UnitIterator, off) = off >= sectionoffset(x.section) + sectionsize(x.section)
 
 # Accelerated access to certain attributes
 const AttrSpec = Nullable{Tuple{UInt,UInt}}
@@ -29,7 +38,7 @@ end
 const specs = AbbrevSpec[]
 const mapping = Dict{Vector{AttributeSpecification}, Int}()
 
-function process_abbrev(entry::AbbrevTableEntry)
+function process_abbrev(entry::AbbrevTableEntry, cu)
     haskey(mapping, entry.attributes) && mapping[entry.attributes]
     offset = 0
     AT_name::AttrSpec = nothing
@@ -43,16 +52,17 @@ function process_abbrev(entry::AbbrevTableEntry)
         elseif name == DW_AT_low_pc
             AT_low_pc = offset % UInt
         end
-        if offset == -1 || form == DW_form_string
+        if offset == -1 || form == DW_FORM_string || form == DW_FORM_exprloc ||
+            form == DW_FORM_udata
             offset = -1
         else
-            offset += Attributes.sizeof_form(form)
+            offset += Attributes.sizeof_form(form, cu)
         end
     end
-    spec = AbbrevSpec(convert(UInt, entry.tag),entry.has_children != 0, entry.AT_name, AT_linkage_name, AT_low_pc,
-        AT_high_pc,reinterpret(UInt,offset))
+    spec = AbbrevSpec(convert(UInt, entry.tag),entry.has_children != 0, AT_name, AT_linkage_name, AT_low_pc,
+        AT_high_pc,reinterpret(UInt,offset),entry)
     push!(specs, spec)
-    mapping[entry.attributes] = spec
+    mapping[entry.attributes] = length(specs)
 end
 
 # A simple reference we can use to pick up where we left off
@@ -60,12 +70,12 @@ immutable LightDIERef
     io::IO
     cu::DWARFCUHeader
     offset::UInt
-    spec_idx::Int
 end
 
 # A cache of values needed for fast navigation of an object file. Should
 # ideally be computed once and saved
 immutable ObjFileCache
+    io::IO
     ats::AbbrevTableSet
     spec_cache::Vector{Int}
     cu_offsets::Vector{UInt}
@@ -98,7 +108,7 @@ end
 function next(c::ChildIterator, state)
     io = c.parent_ref.io
     spec_idx = c.cache.spec_cache[state[2]]
-    ret = LightDIERef(io, c.parent_ref.cu, state[1], spec_idx)
+    ret = LightDIERef(io, c.parent_ref.cu, state[1])
     # To determine the next offset, skip all children
     specs[spec_idx].has_children && skip_children(io, x.cache)
     next_abbrev = read(io, ULEB128)
@@ -109,8 +119,8 @@ done(x::ChildIterator, state) = state[2] == 0
 # Readers for different classes
 function read_address(io::IO, form, cu::DWARFCUHeader, endianness)
     @assert form == DW_FORM_addr
-    T = DWARF.size_to_inttype(header.address_size)
-    AddressAttribute{T}(name,fix_endian(read(io,T),endianness))
+    T = DWARF.size_to_inttype(cu.address_size)
+    fix_endian(read(io,T),endianness)
 end
 
 function read_constant(io::IO, form, cu::DWARFCUHeader, endianness)
@@ -131,8 +141,13 @@ function read_constant(io::IO, form, cu::DWARFCUHeader, endianness)
     end
 end
 
-function pc_range(r::LightDIERef, endianness = Val{:NativeEndian}())
-    spec = specs[r.spec_idx]
+function pc_range(r::LightDIERef, cache, endianness = Val{:NativeEndian}())
+    @show r
+    @show realize(r, cache)
+    seek(r.io, r.offset)
+    abbrev = read(r.io, ULEB128)
+    spec = specs[cache.spec_cache[UInt(abbrev)]]
+    @show spec
     seek(r.io, r.offset + get(spec.AT_low_pc))
     low = read_address(r.io, DW_FORM_addr, r.cu, endianness)
     offset, form = get(spec.AT_high_pc)
@@ -145,13 +160,16 @@ function pc_range(r::LightDIERef, endianness = Val{:NativeEndian}())
     low:high
 end
 
-function searchip(it, fake_cu, ip)
+function searchip(cache, it, fake_cu, ip)
+    io = cache.io
     off = start(it)
     while !done(it, off)
-        this_off = off
-        cu, off = next(it, this_off)
-        ref = LightDIERef(x.oh.io, isa(fake_cu, DWARFCUHeader) ? fake_cu : cu, this_off)
-        range = pc_range(ref)
+        cu, off = next(it, off)
+        @show cu
+        ref = LightDIERef(io, isa(fake_cu, DWARFCUHeader) ? fake_cu : cu, off - cu.unit_length)
+        @show ref
+        range = pc_range(ref, cache)
+        @show range
         if first(range) <= ip <= last(range)
             return ref
         end
@@ -160,39 +178,42 @@ function searchip(it, fake_cu, ip)
 end
 
 function searchcu(x::DebugSections, ip, cache = process_for_objfile(x.oh))
-    it = UnitIterator(x.debug_info)
-    searchip(it, cu, ip)
+    it = UnitIterator{DWARFCUHeader}(x.debug_info)
+    searchip(cache, it, nothing, ip)
 end
 
 function searchcusp(x::DebugSections, ip, cache = process_for_objfile(x.oh))
     curef = searchcu(x,ip,cache)
-    spref = searchip(ChildIterator(curef,cache), cu, ip)
+    spref = searchip(cache, ChildIterator(curef,cache), curef.cu, ip)
+    curef, spref
 end
 
-function resolve_ref(x::DebugSections, offset, cache)
-    idx = searchsortedfirst(cache.offsets, offset) - 1
-    seek(x.oh.io, cache.offsets[idx])
-    cu = read(x.oh.io, DWARFCUHeader)
-    seek(x.oh.io, offset)
-    spec_idx = read(x.oh.io, ULEB128)
-    LightDIERef(x.oh.io, cu, offset, spec_idx % UInt)
+function resolve_ref(cache, offset)
+    io = cache.io
+    idx = searchsortedfirst(cache.cu_offsets, offset) - 1
+    seek(io, cache.cu_offsets[idx])
+    cu = read(io, DWARFCUHeader)
+    LightDIERef(io, cu, offset)
 end
 
-function realize(ref::LightDIERef)
+function realize(ref::LightDIERef, cache)
     seek(ref.io, ref.offset)
-    read(ref.io, ref.cu, specs[ref.spec_idx].entry, DIE, Val{:NativeEndian}())
+    abbrev = UInt(read(ref.io, ULEB128))
+    read(ref.io, ref.cu, specs[cache.spec_cache[abbrev]].entry, DIE, Val{:NativeEndian}())
 end
 
 function process_for_objfile(x::DebugSections, endianness = Val{:NativeEndian}())
     seek(x.debug_abbrev, 0)
     ats = read(handle(x.debug_abbrev).io, AbbrevTableSet, endianness)
-    spec_cache = map(process_abbrev, ats.entries)
     it = UnitIterator{DWARFCUHeader}(x.debug_info)
+    cu = first(it)
+    spec_cache = map(x->process_abbrev(x, cu), ats.entries)
     offsets = UInt[]
     off = start(it)
+    @show ("startoff",off)
     while !done(it, off)
         push!(offsets, off)
         _, off = next(it, off)
     end
-    ObjFileCache(ats, spec_cache, offsets)
+    ObjFileCache(x.oh.io, ats, spec_cache, offsets)
 end
