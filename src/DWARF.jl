@@ -1,7 +1,7 @@
 VERSION >= v"0.4.0-dev+6641" && __precompile__()
 module DWARF
     using ObjFileBase
-    using StrPack
+    using StructIO
     using AbstractTrees
 
     include("constants.jl")
@@ -25,7 +25,7 @@ module DWARF
 
     module DWARF32
         using DWARF
-        using StrPack
+        using StructIO
 
         @struct immutable CUHeader <: DWARF.DWARFCUHeader
             unit_length::UInt32
@@ -72,7 +72,7 @@ module DWARF
 
     module DWARF64
         using DWARF
-        using StrPack
+        using StructIO
 
         @struct immutable CUHeader <: DWARF.DWARFCUHeader
             unit_length::UInt64
@@ -252,14 +252,14 @@ module DWARF
         end
     end
 
-    fix_endian(x,endianness) = StrPack.endianness_converters[endianness][2](x)
-
     const attr_color = :cyan
 
     # Attributes
     module Attributes
         import DWARF
-        import DWARF: ULEB128, SLEB128, attr_color, fix_endian, DW_AT
+        import DWARF: ULEB128, SLEB128, attr_color, DW_AT
+        using StructIO
+        import StructIO: fix_endian
         using ObjFileBase
         using AbstractTrees
         import ObjFileBase: strtab_lookup
@@ -549,7 +549,8 @@ module DWARF
     module Expressions
         # TODO
         using DWARF
-        import DWARF.fix_endian
+        using StructIO
+        import StructIO: fix_endian
 
         type StateMachine{T}
             stack::Array{T,1}
@@ -793,7 +794,7 @@ module DWARF
     # operating on a register machine, whose register represent the
     # values the debugger needs to know about the current source location
     module LineTableSupport
-        using StrPack
+        using StructIO
 
         import ..ULEB128, ..SLEB128, ..DWARF
         import Base: ==
@@ -1282,14 +1283,12 @@ module DWARF
         sets::Array{ARTableSet,1}
     end
 
-    const dummy_dict = Dict{Union{},Array{Integer,1}}() #Since we don't have StrPack support for Parametric types
-
     # aranges tables
     function read(io::IO,::Type{ARTableSet},endianness::Symbol)
         header = read(io,DWARFARHeader,endianness)
         t = ARTableEntry{size_to_inttype(header.segment_size),size_to_inttype(header.address_size)}
         table = ARTableSet(header,Array(t,0))
-        entry_size = StrPack.calcsize(t,dummy_dict,align_packed)
+        entry_size = sizeof(t)
         while true
             skip(io,position(io)%entry_size) # Align to a boundary that is a multiple of the entry size
             r = unpack(io,t,dummy_dict,align_packed,endianness)
@@ -1308,7 +1307,8 @@ module DWARF
     end
 
     function read{T<:PUBTableEntry}(io::IO,::Type{T},endianness::Symbol)
-        offset = StrPack.endianness_converters[endianness][2](read(io,T.types[1]))
+        offset = read(io,T.types[1])
+        StructIO.needs_bswap(endianness) && (offset = bswap(offset))
         if offset != 0
             name = strip(readuntil(io,'\0'),'\0')
         else
