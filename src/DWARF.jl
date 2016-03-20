@@ -133,6 +133,7 @@ module DWARF
 
     Base.convert{T<:LEB128}(::Type{T},x::Int64) = T(big(x))
     Base.convert{T<:LEB128}(::Type{BigInt},x::T) = x.val
+    Base.convert{T<:Integer, S<:LEB128}(::Type{T}, x::S) = convert(T,x.val)
 
     immutable ULEB128 <: LEB128
         val::BigInt
@@ -254,16 +255,57 @@ module DWARF
 
     const attr_color = :cyan
 
+    immutable AttributeSpecification
+        # These are both ULEB128s on disk, but we keep them as
+        # integers in memory to avoid having to deal with BigInt
+        name::UInt64
+        form::UInt8
+    end
+    isequal(a::AttributeSpecification,b::AttributeSpecification) = (a.name == b.name)&&(a.form == b.form)
+    ==(a::AttributeSpecification,b::AttributeSpecification) = isequal(a,b)
+
+    function read(io::IO,::Type{AttributeSpecification},endianness::Symbol)
+        name = read(io,ULEB128)
+        form = read(io,ULEB128)
+        AttributeSpecification(name,form)
+    end
+
+    function read(io::IO,header::DWARF.DWARFCUHeader,a::AttributeSpecification,endianness::Symbol)
+        generic = read(io,Attributes.form2gattrT(a.form),header,a.name,a.form,endianness)
+        # TODO: Return Actual Attributes
+        generic
+    end
+
+    immutable AbbrevTableEntry
+        # These are technically ULEB128 in the on disk format, but we keep them
+        # as UInt64 in memory which should be large enough for anything ever
+        # encoutered in reality
+        code::UInt64
+        tag::UInt64
+        has_children::UInt8
+        attributes::Array{AttributeSpecification,1}
+    end
+
+    immutable AbbrevTableSet
+        entries::Array{AbbrevTableEntry,1}
+    end
+    zero(::Type{AbbrevTableEntry}) = AbbrevTableEntry(0,0,UInt8(0),Array(AttributeSpecification,0))
+
+
+    function readorskip
+    end
+    include("dies.jl")
     # Attributes
     module Attributes
         import DWARF
-        import DWARF: ULEB128, SLEB128, attr_color, DW_AT
+        import DWARF: ULEB128, SLEB128, attr_color, DW_AT, DW_FORM, AttributeSpecification
         using StructIO
         import StructIO: fix_endian
         using ObjFileBase
         using AbstractTrees
         import ObjFileBase: strtab_lookup
         import AbstractTrees: printnode
+        import DWARF: readorskip
 
         import Base: isequal, read, show, bytestring, ==
         export AttributeSpecification, Attribute, GenericStringAttribute,
@@ -271,6 +313,7 @@ module DWARF
             UConstant, GenericStringAttribute, StrTableReference
 
 
+        include("forms.jl")
         # Printing
 
         function print_name(io, x, kind; indent = 0, kwargs...)
@@ -293,8 +336,8 @@ module DWARF
         # attributes in the tree.
         ##
 
-        abstract Attribute
-        abstract GenericAttribute <: Attribute
+        abstract AbstractAttribute
+        abstract GenericAttribute <: AbstractAttribute
 
         immutable AddressAttribute{T<:Union{Int64,UInt64,Int32,UInt32,Ptr{Void}}} <: GenericAttribute
             name::ULEB128
@@ -337,7 +380,7 @@ module DWARF
         macro gattr(attr_name,supertype,ctype)
             esc(quote
                 immutable $attr_name <: $supertype
-                    name::ULEB128
+                    name::UInt64
                     content::$ctype
                     ($(attr_name))(name::ULEB128) = new(name,zero($ctype))
                     ($(attr_name))(name::ULEB128,content::$ctype) = new(name,content)
@@ -373,15 +416,15 @@ module DWARF
         abstract GenericStringAttribute <: GenericAttribute
 
         # # # 32/64-bit dependent types
-        abstract StrTableReference <: GenericStringAttribute
+        abstract StrTableReferenceAttr <: GenericStringAttribute
         abstract SectionOffset <: GenericAttribute
         module DWARF32
             import DWARF.ULEB128
             using ..Attributes
             using AbstractTrees
             import AbstractTrees: printnode
-            immutable StrTableReference <: Attributes.StrTableReference
-                name::ULEB128
+            immutable StrTableReference <: Attributes.StrTableReferenceAttr
+                name::UInt64
                 content::UInt32
             end
             @Attributes.gattr DebugInfoReference Attributes.DebugInfoReference UInt32
@@ -393,18 +436,18 @@ module DWARF
             using ..Attributes
             using AbstractTrees
             import AbstractTrees: printnode
-            immutable StrTableReference <: Attributes.StrTableReference
-                name::ULEB128
+            immutable StrTableReference <: Attributes.StrTableReferenceAttr
+                name::UInt64
                 content::UInt64
             end
             @Attributes.gattr DebugInfoReference Attributes.DebugInfoReference UInt64
             @Attributes.gattr SectionOffset Attributes.SectionOffset UInt64
         end
-        function bytestring(x::StrTableReference, strtab = nothing)
+        function bytestring(x::StrTableReferenceAttr, strtab = nothing)
             strtab_lookup(strtab, x.content)
         end
 
-        function printnode(io::IO, x::StrTableReference; kwargs...)
+        function printnode(io::IO, x::StrTableReferenceAttr; kwargs...)
             strtab = isa(io, IOContext) ? get(io, :strtab, nothing) : nothing
             print_name(io, x, :StrTableReference; kwargs...)
             if strtab === nothing
@@ -427,36 +470,36 @@ module DWARF
         end
 
         const form_mapping = [
-            AddressAttribute,       # DW_FORM_addr
-            UnimplementedAttribute, # -- Invalid
-            BlockAttribute,         # DW_FORM_block2
-            BlockAttribute,         # DW_FORM_block4
-            Constant2,              # DW_FORM_data2
-            Constant4,              # DW_FORM_data4
-            Constant8,              # DW_FORM_data8
-            StringAttribute,        # DW_FORM_string
-            BlockAttribute,         # DW_FORM_block
-            BlockAttribute,         # DW_FORM_block1
-            Constant1,              # DW_FORM_data1
-            ExplicitFlag,           # DW_FORM_flag
-            SConstant,              # DW_FORM_sdata
-            StrTableReference,      # DW_FORM_strp
-            UConstant,              # DW_FORM_udata
-            DebugInfoReference,     # DW_FORM_ref_addr
-            Reference1,             # DW_FORM_ref1
-            Reference2,             # DW_FORM_ref2
-            Reference4,             # DW_FORM_ref4
-            Reference8,             # DW_FORM_ref8
-            UReference,             # DW_FORM_ref_udata
-            UnimplementedAttribute, # DW_FORM_indirect
-            SectionOffset,          # DW_FORM_sec_offset
-            ExprLocAttribute,       # DW_FORM_exprloc
-            ImplicitFlag,           # DW_FORM_flag_present
-            UnimplementedAttribute  # DW_FORM_ref_sig8
+        AddressAttribute,       # DW_FORM_addr
+        UnimplementedAttribute, # -- Invalid
+        BlockAttribute,         # DW_FORM_block2
+        BlockAttribute,         # DW_FORM_block4
+        Constant2,              # DW_FORM_data2
+        Constant4,              # DW_FORM_data4
+        Constant8,              # DW_FORM_data8
+        StringAttribute,        # DW_FORM_string
+        BlockAttribute,         # DW_FORM_block
+        BlockAttribute,         # DW_FORM_block1
+        Constant1,              # DW_FORM_data1
+        ExplicitFlag,           # DW_FORM_flag
+        SConstant,              # DW_FORM_sdata
+        StrTableReference,      # DW_FORM_strp
+        UConstant,              # DW_FORM_udata
+        DebugInfoReference,     # DW_FORM_ref_addr
+        Reference1,             # DW_FORM_ref1
+        Reference2,             # DW_FORM_ref2
+        Reference4,             # DW_FORM_ref4
+        Reference8,             # DW_FORM_ref8
+        UReference,             # DW_FORM_ref_udata
+        UnimplementedAttribute, # DW_FORM_indirect
+        SectionOffset,          # DW_FORM_sec_offset
+        ExprLocAttribute,       # DW_FORM_exprloc
+        ImplicitFlag,           # DW_FORM_flag_present
+        UnimplementedAttribute  # DW_FORM_ref_sig8
         ]
 
-        function form2gattrT(form::ULEB128)
-            mapping = form_mapping[form.val]
+        function form2gattrT(form)
+            mapping = form_mapping[UInt(form)]
             if mapping == UnimplementedAttribute
                 error("Unimplemented Attribute Form $form")
             end
@@ -523,25 +566,6 @@ module DWARF
             elseif typeof(header.debug_abbrev_offset) == UInt64
                 DWARF64.SectionOffset(name,fix_endian(read(io,UInt64),endianness))
             end
-        end
-
-        immutable AttributeSpecification
-            name::ULEB128
-            form::ULEB128
-        end
-        isequal(a::AttributeSpecification,b::AttributeSpecification) = (a.name == b.name)&&(a.form == b.form)
-        ==(a::AttributeSpecification,b::AttributeSpecification) = isequal(a,b)
-
-        function read(io::IO,::Type{AttributeSpecification},endianness::Symbol)
-            name = read(io,ULEB128)
-            form = read(io,ULEB128)
-            AttributeSpecification(name,form)
-        end
-
-        function read(io::IO,header::DWARF.DWARFCUHeader,a::AttributeSpecification,endianness::Symbol)
-            generic = read(io,form2gattrT(a.form),header,a.name,a.form,endianness)
-            # TODO: Return Actual Attributes
-            generic
         end
     end
     using .Attributes
@@ -1164,8 +1188,8 @@ module DWARF
     zero(::Type{AttributeSpecification}) = AttributeSpecification(ULEB128(BigInt(0)),ULEB128(BigInt(0)))
 
     immutable DIE
-        tag::ULEB128
-        attributes::Array{Attribute,1}
+        tag::UInt64
+        attributes::Array{Attributes.AbstractAttribute,1}
     end
 
     tag(x::DIE) = x.tag
@@ -1335,18 +1359,6 @@ module DWARF
     end
     read(io::IO,::Type{PUBTableSet}) = read(io,PUBTableSet,:NativeEndian)
 
-    immutable AbbrevTableEntry
-        code::ULEB128
-        tag::ULEB128
-        has_children::UInt8
-        attributes::Array{AttributeSpecification,1}
-    end
-
-    immutable AbbrevTableSet
-        entries::Array{AbbrevTableEntry,1}
-    end
-    zero(::Type{AbbrevTableEntry}) = AbbrevTableEntry(ULEB128(BigInt(0)),ULEB128(BigInt(0)),UInt8(0),Array(AttributeSpecification,0))
-
     function read(io::IO,::Type{AbbrevTableEntry},endianness::Symbol)
         code = read(io,ULEB128)
         if code != 0
@@ -1380,7 +1392,7 @@ module DWARF
 
     # Assume position is right after number
     function read(io::IO,header::DWARFCUHeader,ate::AbbrevTableEntry,::Type{DIE},endianness::Symbol)
-        ret = DIE(ate.tag,Array(Attribute,0))
+        ret = DIE(ate.tag,Array(Attributes.AbstractAttribute,0))
         for a in ate.attributes
             push!(ret.attributes,read(io,header,a,endianness))
         end
@@ -1417,7 +1429,7 @@ module DWARF
     end
 
     ## Tree Interface
-    const zero_die = DIE(ULEB128(BigInt(0)),Array(Attribute,0))
+    const zero_die = DIE(ULEB128(BigInt(0)),Array(Attributes.AbstractAttribute,0))
     zero(::Type{DIE}) = zero_die
 
     abstract DIENode
@@ -1482,4 +1494,5 @@ module DWARF
     end
 
     include("utility.jl")
+    include("navigate.jl")
 end #module
