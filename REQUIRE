@@ -1,3 +1,4 @@
-julia 0.2-
-ELF
-StrPack
+julia 0.4
+StructIO
+ObjFileBase
+AbstractTrees
