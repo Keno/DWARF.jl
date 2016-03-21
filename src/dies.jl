@@ -19,7 +19,8 @@ end
 function seekentry(die::LightDIERef)
     seek(die.io, die.offset)
     abbrev = UInt(read(die.io, ULEB128))
-    ate = die.cu.ats.entries[abbrev]
+    abbrev == 0 && return zero_entry
+    die.cu.ats.entries[abbrev]
 end
 
 tag(die::LightDIERef) = seekentry(die).tag
@@ -133,17 +134,26 @@ function realize(ref::LightDIERef)
     read(ref.io, ref.cu.header, ref.cu.ats.entries[abbrev], DIE, :NativeEndian)
 end
 
-function extract_attribute(ref::LightDIERef, name, endianness = :NativeEndian)
-    io = ref.io
-    ate = seekentry(ref)
-    idx = findfirst(x->x.name==name, ate.attributes)
-    idx == 0 && error("Attribute not found")
+function readnthattr(ref, ate, endianness, idx)
     for i = 1:(idx-1)
         readorskip(ref, ate.attributes[i].form, :NativeEndian, Val{:skip}())
     end
     # Form could be indirect, so we need the return value
-    form, value = readorskip(ref, ate.attributes[idx].form, endianness, Val{:read}())
-    Attribute(AttributeSpecification(ate.attributes[idx].name, form), value)
+    readorskip(ref, ate.attributes[idx].form, endianness, Val{:read}())
+end
+
+function extract_attribute(ref::LightDIERef, name, endianness = :NativeEndian)
+    io = ref.io
+    ate = seekentry(ref)
+    idx = findfirst(x->x.name==name, ate.attributes)
+    if idx == 0
+        idx = findfirst(x->x.name==DWARF.DW_AT_abstract_origin, ate.attributes)
+        (idx == 0) && return Nullable{Attribute}()
+        form, value = readnthattr(ref, ate, endianness, idx)
+        return extract_attribute(value, name, endianness)
+    end
+    form, value = readnthattr(ref, ate, endianness, idx)
+    Nullable{Attribute}(Attribute(AttributeSpecification(ate.attributes[idx].name, form), value))
 end
 
 function skip_attributes(ref::LightDIERef, ate)

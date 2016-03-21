@@ -20,7 +20,7 @@ module DWARF
     abstract PUBTableSet
 
     export AbbrevTableEntry, AbbrevTableSet, ULEB128, SLEB128,
-        DIETree, attributes, dies
+        attributes, dies
 
 
     module DWARF32
@@ -290,283 +290,14 @@ module DWARF
         entries::Array{AbbrevTableEntry,1}
     end
     zero(::Type{AbbrevTableEntry}) = AbbrevTableEntry(0,0,UInt8(0),Array(AttributeSpecification,0))
-
+    const zero_entry = zero(AbbrevTableEntry)
 
     function readorskip
     end
     include("dies.jl")
     # Attributes
     module Attributes
-        import DWARF
-        import DWARF: ULEB128, SLEB128, attr_color, DW_AT, DW_FORM, AttributeSpecification
-        using StructIO
-        import StructIO: fix_endian
-        using ObjFileBase
-        using AbstractTrees
-        import ObjFileBase: strtab_lookup
-        import AbstractTrees: printnode
-        import DWARF: readorskip
-
-        import Base: isequal, read, show, bytestring, ==
-        export AttributeSpecification, Attribute, GenericStringAttribute,
-            Constant1, Constant2, Constant4, Constant8, SConstant,
-            UConstant, GenericStringAttribute, StrTableReference
-
-
         include("forms.jl")
-        # Printing
-
-        function print_name(io, x, kind; indent = 0, kwargs...)
-            print(io," "^indent)
-            if !haskey(DW_AT,x.name.val)
-                printfield_with_color(:red, io, string("Unknown ($(x.name.val))"),17; align=:left)
-            else
-                printfield_with_color(attr_color, io, DW_AT[x.name.val],17; align=:left)
-            end
-            printfield(io,string(" [", kind, "] "),25, align = :left)
-        end
-
-        ###
-        # Generic Attributes
-        #
-        # DWARF is designed in such a way that even consumers who may not understand
-        # all the possible arguments can still parse any DAWRF file. To do so, they
-        # have a fixed number of storage formats that need to be supported. In this
-        # implementation attributes which have no specialized form are left as generic
-        # attributes in the tree.
-        ##
-
-        abstract AbstractAttribute
-        abstract GenericAttribute <: AbstractAttribute
-
-        immutable AddressAttribute{T<:Union{Int64,UInt64,Int32,UInt32,Ptr{Void}}} <: GenericAttribute
-            name::ULEB128
-            content::T
-        end
-        for T in (Int64,UInt64,Int32,UInt32,Ptr{Void})
-            Base.convert(::Type{T},x::AddressAttribute{T}) = x.content
-        end
-
-        immutable BlockAttribute <: GenericAttribute
-            name::ULEB128
-            content::Array{UInt8,1}
-        end
-
-        immutable ExprLocAttribute{T} <: GenericAttribute
-            name::ULEB128
-            content::Array{UInt8,1}
-        end
-
-        printnode(io::IO, x::BlockAttribute; kwargs...) =
-            print_name(io, x, :BlockAttribute)
-        function printnode(io::IO, x::AddressAttribute; kwargs...)
-            print_name(io, x, :AddressAttribute; kwargs...)
-            print(io, "0x",hex(x.content,2*sizeof(x.content)))
-        end
-
-        function printnode{T}(io::IO, x::ExprLocAttribute{T}; kwargs...)
-            print_name(io, x, :ExprLocAttribute; kwargs...)
-            DWARF.Expressions.print_expression(io,T,x.content,:NativeEndian)
-        end
-
-        function show(io::IO, x::GenericAttribute; indent = 0, kwargs...)
-            printnode(io, x; indent = indent, kwargs...)
-            println(io)
-        end
-
-
-        abstract GenericConstantAttribute <: GenericAttribute
-
-        macro gattr(attr_name,supertype,ctype)
-            esc(quote
-                immutable $attr_name <: $supertype
-                    name::UInt64
-                    content::$ctype
-                    ($(attr_name))(name::ULEB128) = new(name,zero($ctype))
-                    ($(attr_name))(name::ULEB128,content::$ctype) = new(name,content)
-                end
-                function printnode(io::IO,x::$attr_name; kwargs...)
-                    Attributes.print_name(io, x, $(string(attr_name)); kwargs...)
-                    print(io, x.content)
-                end
-                function Base.convert{T<:Integer}(::Type{T},x::$attr_name)
-                    convert(T,x.content)
-                end
-            end)
-        end
-
-        @gattr ExplicitFlag GenericAttribute UInt8
-        @gattr ImplicitFlag GenericAttribute Void
-        @gattr Constant1 GenericConstantAttribute UInt8
-        @gattr Constant2 GenericConstantAttribute UInt16
-        @gattr Constant4 GenericConstantAttribute UInt32
-        @gattr Constant8 GenericConstantAttribute UInt64
-        @gattr SConstant GenericConstantAttribute SLEB128
-        @gattr UConstant GenericConstantAttribute ULEB128
-
-        abstract GenericReferenceAttribute <: GenericAttribute
-        abstract DebugInfoReference <: GenericReferenceAttribute
-
-        @gattr Reference1 GenericReferenceAttribute UInt8
-        @gattr Reference2 GenericReferenceAttribute UInt16
-        @gattr Reference4 GenericReferenceAttribute UInt32
-        @gattr Reference8 GenericReferenceAttribute UInt64
-        @gattr UReference GenericReferenceAttribute ULEB128
-
-        abstract GenericStringAttribute <: GenericAttribute
-
-        # # # 32/64-bit dependent types
-        abstract StrTableReferenceAttr <: GenericStringAttribute
-        abstract SectionOffset <: GenericAttribute
-        module DWARF32
-            import DWARF.ULEB128
-            using ..Attributes
-            using AbstractTrees
-            import AbstractTrees: printnode
-            immutable StrTableReference <: Attributes.StrTableReferenceAttr
-                name::UInt64
-                content::UInt32
-            end
-            @Attributes.gattr DebugInfoReference Attributes.DebugInfoReference UInt32
-            @Attributes.gattr SectionOffset Attributes.SectionOffset UInt32
-        end
-
-        module DWARF64
-            import DWARF.ULEB128
-            using ..Attributes
-            using AbstractTrees
-            import AbstractTrees: printnode
-            immutable StrTableReference <: Attributes.StrTableReferenceAttr
-                name::UInt64
-                content::UInt64
-            end
-            @Attributes.gattr DebugInfoReference Attributes.DebugInfoReference UInt64
-            @Attributes.gattr SectionOffset Attributes.SectionOffset UInt64
-        end
-        function bytestring(x::StrTableReferenceAttr, strtab = nothing)
-            strtab_lookup(strtab, x.content)
-        end
-
-        function printnode(io::IO, x::StrTableReferenceAttr; kwargs...)
-            strtab = isa(io, IOContext) ? get(io, :strtab, nothing) : nothing
-            print_name(io, x, :StrTableReference; kwargs...)
-            if strtab === nothing
-                print(io, ".debug_str[0x",hex(x.content,2*sizeof(x.content))"]")
-            else
-                show(io, strtab_lookup(strtab, x.content))
-            end
-        end
-
-        immutable StringAttribute <: GenericStringAttribute
-            name::ULEB128
-            content::ASCIIString
-        end
-        function printnode(io::IO, x::StringAttribute; kwargs...)
-            print_name(io, x, :StringAttribute; kwargs...)
-            show(io, x.content)
-        end
-
-        immutable UnimplementedAttribute
-        end
-
-        const form_mapping = [
-        AddressAttribute,       # DW_FORM_addr
-        UnimplementedAttribute, # -- Invalid
-        BlockAttribute,         # DW_FORM_block2
-        BlockAttribute,         # DW_FORM_block4
-        Constant2,              # DW_FORM_data2
-        Constant4,              # DW_FORM_data4
-        Constant8,              # DW_FORM_data8
-        StringAttribute,        # DW_FORM_string
-        BlockAttribute,         # DW_FORM_block
-        BlockAttribute,         # DW_FORM_block1
-        Constant1,              # DW_FORM_data1
-        ExplicitFlag,           # DW_FORM_flag
-        SConstant,              # DW_FORM_sdata
-        StrTableReference,      # DW_FORM_strp
-        UConstant,              # DW_FORM_udata
-        DebugInfoReference,     # DW_FORM_ref_addr
-        Reference1,             # DW_FORM_ref1
-        Reference2,             # DW_FORM_ref2
-        Reference4,             # DW_FORM_ref4
-        Reference8,             # DW_FORM_ref8
-        UReference,             # DW_FORM_ref_udata
-        UnimplementedAttribute, # DW_FORM_indirect
-        SectionOffset,          # DW_FORM_sec_offset
-        ExprLocAttribute,       # DW_FORM_exprloc
-        ImplicitFlag,           # DW_FORM_flag_present
-        UnimplementedAttribute  # DW_FORM_ref_sig8
-        ]
-
-        function form2gattrT(form)
-            mapping = form_mapping[UInt(form)]
-            if mapping == UnimplementedAttribute
-                error("Unimplemented Attribute Form $form")
-            end
-            mapping
-        end
-
-        read(io::IO,name::ULEB128,::Type{UConstant}) = UConstant(name,read(io,ULEB128))
-        read(io::IO,name::ULEB128,::Type{SConstant}) = SConstant(name,read(io,SLEB128))
-        read(io::IO,name::ULEB128,::Type{UReference}) = UReference(name,read(io,ULEB128))
-        read(io::IO,name::ULEB128,::Type{ExplicitFlag}) = ExplicitFlag(name,read(io,UInt8))
-        read(io::IO,name::ULEB128,::Type{ImplicitFlag}) = ImplicitFlag(name,nothing)
-        function read{T<:Union{GenericConstantAttribute,GenericReferenceAttribute}}(io::IO,::Type{T},
-                                            header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
-            t = T(name)
-            t = T(name,fix_endian(read(io,typeof(t.content)),endianness))
-            t
-        end
-        read(io::IO,name::ULEB128,T::Type{StringAttribute}) = StringAttribute(name,strip(readuntil(io,'\0'),'\0'))
-        read{T<:GenericAttribute}(io::IO,::Type{T},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol) = read(io,name,T)
-        function read(io::IO,::Type{BlockAttribute},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
-            if form == DWARF.DW_FORM_block1
-                length = read(io,UInt8)
-            elseif form == DWARF.DW_FORM_block2
-                length = fix_endian(read(io,UInt16),endianness)
-            elseif form == DWARF.DW_FORM_block4
-                length = fix_endian(read(io,UInt32),endianness)
-            elseif form == DWARF.DW_FORM_block
-                length = fix_endian(read(io,ULEB128),endianness)
-            else
-                error("Unkown Block Form $form")
-            end
-            content = Array(UInt8,length)
-            read!(io,content)
-            BlockAttribute(name,content)
-        end
-        function read(io::IO,::Type{ExprLocAttribute},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
-            length = read(io,ULEB128).val
-            content = Array(UInt8,length)
-            read!(io,content)
-            T = DWARF.size_to_inttype(header.address_size)
-            ExprLocAttribute{T}(name, content)
-        end
-        function read(io::IO,::Type{AddressAttribute},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
-            T = DWARF.size_to_inttype(header.address_size)
-            AddressAttribute{T}(name,fix_endian(read(io,T),endianness))
-        end
-        function read(io::IO,::Type{StrTableReference},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
-            if typeof(header.debug_abbrev_offset) == UInt32
-                DWARF32.StrTableReference(name,fix_endian(read(io,UInt32),endianness))
-            elseif typeof(header.debug_abbrev_offset) == UInt64
-                DWARF64.StrTableReference(name,fix_endian(read(io,UInt64),endianness))
-            end
-        end
-        function read(io::IO,::Type{DebugInfoReference},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
-            if typeof(header.debug_abbrev_offset) == UInt32 && header.version > 2
-                DWARF32.DebugInfoReference(name,fix_endian(read(io,UInt32),endianness))
-            else
-                DWARF64.DebugInfoReference(name,fix_endian(read(io,UInt64),endianness))
-            end
-        end
-        function read(io::IO,::Type{SectionOffset},header::DWARF.DWARFCUHeader,name,form,endianness::Symbol)
-            if typeof(header.debug_abbrev_offset) == UInt32
-                DWARF32.SectionOffset(name,fix_endian(read(io,UInt32),endianness))
-            elseif typeof(header.debug_abbrev_offset) == UInt64
-                DWARF64.SectionOffset(name,fix_endian(read(io,UInt64),endianness))
-            end
-        end
     end
     using .Attributes
 
@@ -684,7 +415,7 @@ module DWARF
                 push!(s.stack,~(pop!(s.stack)))
             elseif opcode == DWARF.DW_OP_plus_uconst
                 (i,val) = DWARF.decode(opcodes,i,ULEB128)
-                push!(s.stack,pop!(s.stack)+val)
+                push!(s.stack,pop!(s.stack)+val.val)
             elseif opcode == DWARF.DW_OP_shl
                 top = pop!(s.stack)
                 push!(s.stack,pop!(s.stack)<<top)
@@ -1187,31 +918,11 @@ module DWARF
 
     zero(::Type{AttributeSpecification}) = AttributeSpecification(ULEB128(BigInt(0)),ULEB128(BigInt(0)))
 
-    immutable DIE
-        tag::UInt64
-        attributes::Array{Attributes.AbstractAttribute,1}
-    end
-
-    tag(x::DIE) = x.tag
-    tag{T<:Attributes.GenericAttribute}(x::T) = x.name
-    attributes(x::DIE) = x.attributes
-
     const tag_color = :blue
 
     function tag_name(tag)
         get(DW_TAG, tag, "Unknown tag $tag")
     end
-
-    showcompact(io::IO,d::DIE) = print(io,"DIE(type ",d.tag.val,", ",length(d.attributes)," Attributes)")
-    printnode(io::IO, d::DIE) = print_with_color(tag_color, io, tag_name(d.tag))
-    function show(io::IO, d::DIE; indent = 0, strtab = nothing)
-        printnode(io, d)
-        println(io)
-        for attr in d.attributes
-            show(io, attr; indent = indent + 2, strtab = strtab)
-        end
-    end
-
 
     immutable ARTableEntry{S,T}
         segment::S
@@ -1390,26 +1101,6 @@ module DWARF
         ret
     end
 
-    # Assume position is right after number
-    function read(io::IO,header::DWARFCUHeader,ate::AbbrevTableEntry,::Type{DIE},endianness::Symbol)
-        ret = DIE(ate.tag,Array(Attributes.AbstractAttribute,0))
-        for a in ate.attributes
-            push!(ret.attributes,read(io,header,a,endianness))
-        end
-        ret
-    end
-    function read(io::IO,header::DWARFCUHeader,ats::AbbrevTableSet,::Type{DIE},endianness::Symbol)
-        num = read(io,ULEB128)
-        ae = ats.entries[num.val]
-        read(io,header,ae,DIE,endianness)
-    end
-
-
-    function read(io::IO,::Type{DIE},endianness::Symbol)
-        tag = read(io,ULEB128)
-        DIE(tag,Array(AttributeSpecification,0))
-    end
-
     function read{T}(io::IO,::Type{LocationList{T}})
         ret = LocationListEntry{T}[]
         while true
@@ -1428,71 +1119,5 @@ module DWARF
         LocationList{T}(ret)
     end
 
-    ## Tree Interface
-    const zero_die = DIE(ULEB128(BigInt(0)),Array(Attributes.AbstractAttribute,0))
-    zero(::Type{DIE}) = zero_die
-
-    abstract DIENode
-
-    immutable DIETreeNode <: DIENode
-        self::DIE
-        children::Array{DIETreeNode,1}
-        parent::DIENode
-    end
-    printnode(io::IO, node::DIETreeNode) = printnode(io, node.self)
-
-    # Iterating over a DIETreeNode yields attributes, then children
-    start(x::DIETreeNode) = 1
-    function next(x::DIETreeNode,it)
-        val = (it <= length(attributes(x))) ?
-            attributes(x)[it] : x.children[it-length(attributes(x))]
-        (val, it+1)
-    end
-    done(x::DIETreeNode, it) = it > length(attributes(x)) + length(x.children)
-
-    tag(x::DIETreeNode) = tag(x.self)
-    attributes(x::DIETreeNode) = attributes(x.self)
-
-    type DIETree <: DIENode
-        children::Array{DIETreeNode,1}
-    end
-    children(x::DIETree) = x.children
-
-    showcompact(io::IO,node::DIETreeNode) = (print(io,"DIETreeNode(");showcompact(io,node.self);print(io,", ",length(node.children)," children)"))
-    showcompact(io::IO,node::DIETree) = print(io,"DIETree(",length(node.children)," children)")
-
-    function show(io::IO, node::DIETreeNode; indent = 0, strtab = nothing)
-        show(io, node.self; indent = indent, strtab = strtab)
-        for child in node.children
-            show(io, child; indent = indent + 2, strtab = strtab)
-        end
-    end
-    function show(io::IO, tree::DIETree; strtab = nothing)
-        for child in tree.children
-            show(io, child; strtab = strtab)
-        end
-    end
-
-    const zero_node = DIETreeNode(zero(DIE),Array(DIETreeNode,0),DIETree(Array(DIETreeNode,0)))
-
-    zero(::Type{DIETreeNode}) = zero_node
-    zero(::Type{DIETree}) = DIETree(DIETreeNode[])
-
-    function read(io::IO,header::DWARFCUHeader,ats::AbbrevTableSet,parent::Union{DIETree,DIETreeNode},::Type{DIETreeNode},endianness::Symbol)
-        num = read(io,ULEB128)
-        if num != 0
-            ae = ats.entries[num.val]
-            ret = DIETreeNode(read(io,header,ae,DIE,endianness),Array(DIETreeNode,0),parent)
-            push!(parent.children,ret)
-            if(ae.has_children == DW_CHILDREN_yes)
-                read(io,header,ats,ret,DIETreeNode,endianness)
-            end
-            isa(parent,DIETreeNode) && read(io,header,ats,parent,DIETreeNode,endianness)
-            return ret
-        end
-        zero(DIETreeNode)
-    end
-
-    include("utility.jl")
     include("navigate.jl")
 end #module

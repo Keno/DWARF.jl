@@ -1,5 +1,15 @@
-import DWARF: LEB128, LightDIERef
-import Base: print, show, convert
+import DWARF: LEB128, LightDIERef, ULEB128, SLEB128, attr_color, DW_AT, DW_FORM, AttributeSpecification
+using StructIO
+import StructIO: fix_endian
+using ObjFileBase
+using AbstractTrees
+import ObjFileBase: strtab_lookup
+import AbstractTrees: printnode
+using DWARF
+import DWARF: readorskip
+export Attribute
+
+import Base: isequal, read, bytestring, ==, print, show, convert
 
 # An attribute, encapsulating the name, form and value
 immutable Attribute
@@ -7,6 +17,7 @@ immutable Attribute
     value
 end
 convert{T}(::Type{T},at::Attribute) = convert(T, at.value)
+convert(::Type{Attribute},at::Attribute) = at
 
 function Base.show(io::IO, at::Attribute)
     indent = isa(io, IOContext) ? get(io, :indent, 0) : 0
