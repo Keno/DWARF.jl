@@ -38,7 +38,7 @@ function start(it::AttributeIterator)
     (position(it.die.io), 1)
 end
 function next(it::AttributeIterator, state)
-    endianess = :NativeEndian
+    endianness = :NativeEndian
     seek(it.die.io,state[1])
     idx = state[2]
     form, value = readorskip(it.die, it.ate.attributes[idx].form, endianness, Val{:read}())

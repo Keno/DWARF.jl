@@ -99,6 +99,8 @@ readorskip(io::IO, T::Type, endianness, ::Val{:skip}) = (skip(io, sizeof(T)); no
 readorskip(io::IO, T::Type, endianness, ::Val{:read}) = unpack(io, T, endianness)
 readorskip{T<:LEB128}(io::IO, ::Type{T}, endianness, ::Val{:skip}) =
     while (read(io,UInt8)&0x80)!=0;end
+readorskip{T<:LEB128}(io::IO, ::Type{T}, endianness, ::Val{:read}) = read(io, T)
+
 readbytesorskip(io::IO, nbytes, ::Val{:skip}) = (skip(io, nbytes); nothing)
 readbytesorskip(io::IO, nbytes, ::Val{:read}) = read(io, nbytes)
 
@@ -153,7 +155,7 @@ function readorskip(cu::LightDIERef, form, endianness, ros)
         ret = readorskip(io, ULEB128, endianness, ros)
     elseif form == DWARF.DW_FORM_ref_addr
         ret = readorskip(io, cuheader.version == 2 ?
-            size_to_inttype(cuheader.address_size) :
+            DWARF.size_to_inttype(cuheader.address_size) :
             typeof(cuheader.unit_length), endianness, ros)
     elseif form == DWARF.DW_FORM_ref1
         ret = make_ref(cu, readorskip(io, UInt8, endianness, ros))
