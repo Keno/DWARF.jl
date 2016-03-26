@@ -803,7 +803,7 @@ module DWARF
             elseif opcode == DWARF.DW_LNS_advance_line
                 m.state = RegisterState(m.state,line = m.state.line + operands[1].val)
             elseif opcode == DWARF.DW_LNS_set_file
-                m.state = RegisterState(m.state,line = operands[1])
+                m.state = RegisterState(m.state,file = operands[1])
             elseif opcode == DWARF.DW_LNS_set_column
                 m.state = RegisterState(m.state,column = operands[1])
             elseif opcode == DWARF.DW_LNS_negate_stmt
