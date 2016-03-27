@@ -16,8 +16,12 @@ immutable Attribute
     spec::AttributeSpecification
     value
 end
+convert{T}(::Type{Nullable{T}}, at::Attribute) = Nullable{T}(convert(T,at))
+convert{T}(::Type{Ref{T}}, at::Attribute) = RefValue{T}(convert(T,at))
+convert(::Type{Nullable{Attribute}}, at::Attribute) = Nullable{T}(at)
 convert{T}(::Type{T},at::Attribute) = convert(T, at.value)
 convert(::Type{Attribute},at::Attribute) = at
+
 
 function Base.show(io::IO, at::Attribute)
     indent = isa(io, IOContext) ? get(io, :indent, 0) : 0

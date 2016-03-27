@@ -363,11 +363,13 @@ module DWARF
             return (i,operand)
         end
 
-        function evaluate_generic_instruction{T}(s::StateMachine{T},opcodes,i,getreg_func::Function,getword_func,addr_func,endianness::Symbol)
+        function evaluate_generic_instruction{T}(s::StateMachine{T},opcodes,i,
+                getreg_func::Function,getword_func,addr_func,endianness::Symbol)
             opcode = opcodes[i]
             i+=1
             if opcode == DWARF.DW_OP_deref
-                push!(s.stack,getword_func(pop!(s.stack)))
+                addr = pop!(s.stack)
+                push!(s.stack,getword_func(addr))
             elseif in(opcode,(DWARF.DW_OP_const1u,DWARF.DW_OP_const1s,DWARF.DW_OP_const2u,
                               DWARF.DW_OP_const2s,DWARF.DW_OP_const4u,DWARF.DW_OP_const4s,DWARF.DW_OP_const8u,
                               DWARF.DW_OP_const8s,DWARF.DW_OP_constu,DWARF.DW_OP_consts))
@@ -480,13 +482,10 @@ module DWARF
 
         function evaluate_generic{T}(s::StateMachine{T},opcodes::Array{UInt8,1},getreg_func::Function,getword_func,addr_func,endianness::Symbol)
             i=1
-            while true
+            while i <= length(opcodes)
                 i,res = evaluate_generic_instruction(s,opcodes,i,getreg_func,getword_func,addr_func,endianness)
                 if !res
                     error("Unrecognized Opcode ",opcodes[i])
-                end
-                if i>=length(opcodes)
-                    break
                 end
             end
         end
@@ -530,7 +529,8 @@ module DWARF
             i::T
         end
 
-        function evaluate_simple_location{T}(s::StateMachine{T},opcodes::Array{UInt8,1},getreg_func::Function,getword_func,addr_func,endianness::Symbol)
+        function evaluate_simple_location{T}(s::StateMachine{T},opcodes::Array{UInt8,1},
+                getreg_func::Function,getword_func,addr_func,endianness::Symbol)
             i=1
             opcode = opcodes[i]
             if opcode >= DWARF.DW_OP_reg0 && opcode <= DWARF.DW_OP_reg31
