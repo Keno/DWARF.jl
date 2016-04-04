@@ -1,10 +1,11 @@
 module CallFrameInfo
 
 using DWARF
-using DWARF: DIETreeRef, SLEB128, ULEB128
+using DWARF: SLEB128, ULEB128
 import DWARF.tag, DWARF.children, DWARF.attributes
 using ELF
-using ObjFileBase: DebugSections, ObjectHandle
+using ObjFileBase
+using ObjFileBase: DebugSections, ObjectHandle, handle
 import Base.read
 function read_cstring(io)
     a = Array(UInt8, 0)
@@ -112,72 +113,103 @@ function absolute_initial_loc(fde::FDE)
     end
 end
 
-function interpret_op(s :: RegStates, ops, cie :: CIE)
+immutable RegNum
+    num::UInt64
+end
+
+function operands(ops, opcode, addrT)
+    if opcode == DWARF.DW_CFA_nop || opcode == DWARF.DW_CFA_remember_state ||
+            opcode == DWARF.DW_CFA_restore_state
+        return ()
+    elseif (opcode & 0xc0) == DWARF.DW_CFA_advance_loc ||
+            (opcode & 0xc0) == DWARF.DW_CFA_restore
+        return (opcode & ~0xc0,)
+    elseif (opcode & 0xc0) == DWARF.DW_CFA_offset
+        return (opcode & ~0xc0, UInt(read(ops, ULEB128)))
+    elseif opcode == DWARF.DW_CFA_set_loc
+        return (read(ops, addrT),)
+    elseif opcode == DWARF.DW_CFA_advance_loc1
+        return (read(ops, UInt8),)
+    elseif opcode == DWARF.DW_CFA_advance_loc2
+        return (read(ops, UInt16),)
+    elseif opcode == DWARF.DW_CFA_advance_loc4
+        return (read(ops, UInt32),)
+    elseif opcode == DWARF.DW_CFA_offset_extended || opcode == DWARF.DW_CFA_def_cfa ||
+            opcode == DWARF.DW_CFA_offset_extended_sf || opcode == DWARF.DW_CFA_def_cfa_sf
+        reg = RegNum(read(ops, ULEB128))
+        offset = UInt(read(ops, ULEB128))
+        return (reg, offset)
+    elseif opcode == DWARF.DW_CFA_register
+        reg1 = RegNum(read(ops, ULEB128))
+        reg2 = RegNum(read(ops, ULEB128))
+        return (reg1, reg2)
+    elseif opcode == DWARF.DW_CFA_restore_extended || opcode == DWARF.DW_CFA_undefined ||
+            opcode == DWARF.DW_CFA_same_value || opcode == DWARF.DW_CFA_def_cfa_register
+        return (RegNum(read(ops, ULEB128)),)
+    elseif opcode == DWARF.DW_CFA_def_cfa_offset
+        return (UInt(read(ops, ULEB128)),)
+    elseif opcode == DWARF.DW_CFA_def_cfa_expression
+        length = UInt(read(ops, ULEB128))
+        return (read(ops, UInt8, length),)
+    elseif opcode == DWARF.DW_CFA_expression
+        reg =  RegNum(read(ops, ULEB128))
+        length = UInt(read(ops, ULEB128))
+        return (reg, read(ops, UInt8, length))
+    elseif opcode == DWARF.DW_CFA_val_expression
+        val = UInt(read(ops, ULEB128))
+        length = UInt(read(ops, ULEB128))
+        return (val, read(ops, UInt8, length))
+    elseif opcode == DWARF.DW_CFA_def_cfa_offset_sf
+        return (Int(read(ops, SLEB128)), )
+    elseif opcode == DWARF.DW_CFA_val_offset
+        val = UInt(read(ops, ULEB128))
+        offset = UInt(read(ops, ULEB128))
+        return (val, offset)
+    elseif opcode == DWARF.DW_CFA_val_offset_sf
+        val = UInt(read(ops, ULEB128))
+        offset = Int(read(ops, SLEB128))
+        return (val, offset)
+    else
+        error("Unknown opcode")
+    end
+end
+
+function evaluage_op(s :: RegStates, ops, cie :: CIE)
     op = read(ops, UInt8)
     #    @show op
     # Section 6.4.2 of DWARF 4
+    opops = opreands(ops, opcode, UInt64)
     if op == DWARF.DW_CFA_set_loc                 # 6.4.2.1 Row creation
         error()
-    elseif (op & 0xc0) == DWARF.DW_CFA_advance_loc
-        delta = Int(op & ~0xc0)
-        s.delta += delta * cie.code_align
-    elseif op == DWARF.DW_CFA_advance_loc1
-        s.delta += read(ops, UInt8) * cie.code_align
-    elseif op == DWARF.DW_CFA_advance_loc2
-        s.delta += read(ops, UInt16) * cie.code_align
-    elseif op == DWARF.DW_CFA_advance_loc4
-        s.delta += read(ops, UInt32) * cie.code_align
-    elseif op == DWARF.DW_CFA_def_cfa             # 6.4.2.2 CFA definitions        
-        reg = convert(Int,read(ops, ULEB128))
-        off = convert(Int,read(ops, ULEB128))
-        s.cfa = (reg, off)
+    elseif (op & 0xc0) == DWARF.DW_CFA_advance_loc || op == DWARF.DW_CFA_advance_loc1 ||
+            op == DWARF.DW_CFA_advance_loc2 || op == DWARF.DW_CFA_advance_loc4
+        s.delta += opops[1] * cie.code_align
+    elseif op == DWARF.DW_CFA_def_cfa             # 6.4.2.2 CFA definitions
+        s.cfa = opops
     elseif op == DWARF.DW_CFA_def_cfa_sf
-        reg = convert(Int,read(ops, ULEB128))
-        off = convert(Int,read(ops, SLEB128))
-        s.cfa = (reg, off*cie.data_align)
+        s.cfa = (opops[1], opops[2]*cie.data_align)
     elseif op == DWARF.DW_CFA_def_cfa_register
-        @assert(isa(s.cfa,Tuple{Int,Int}))
-        reg = convert(Int,read(ops,ULEB128))
-        s.cfa = (reg, s.cfa[2])
+        s.cfa = (opops[1], s.cfa[2])
     elseif op == DWARF.DW_CFA_def_cfa_offset
-        @assert(isa(s.cfa, Tuple{Int,Int}))
-        s.cfa = (s.cfa[1], convert(Int, read(ops, ULEB128)))
+        s.cfa = (s.cfa[1], opops[1])
     elseif op == DWARF.DW_CFA_def_cfa_offset_sf
-        @assert(isa(s.cfa, Tuple{Int,Int}))
-        s.cfa = (s.cfa[1], convert(Int, read(ops, SLEB128))*cie.data_align)
+        s.cfa = (s.cfa[1], opops[1]*cie.data_align)
     elseif op == DWARF.DW_CFA_def_cfa_expression
-        len = convert(Int,read(ops,ULEB128))
-        s.cfa = Expr(read(ops,UInt8,len), true)
+        s.cfa = opops[1]
     elseif op == DWARF.DW_CFA_undefined           # 6.4.2.3 Register rules
-        reg = convert(Int, read(ops, ULEB128))
-        s[reg] = Undef()
+        s[opops[1]] = Undef()
     elseif op == DWARF.DW_CFA_same_value
-        reg = convert(Int, read(ops, ULEB128))
-        s[reg] = Same()
+        s[opops[1]] = Same()
     elseif (op & 0xc0) == DWARF.DW_CFA_offset
-        reg = Int(op & ~0xc0)
-        off = convert(Int, read(ops, ULEB128))*cie.data_align
-        s[reg] = Offset(off, false)
-    elseif op == DWARF.DW_CFA_offset_extended
-        reg = convert(Int, read(ops, ULEB128))
-        off = convert(Int, read(ops, ULEB128))*cie.data_align
-        s[reg] = Offset(off, false)
-    elseif op == DWARF.DW_CFA_offset_extended_sf
-        reg = convert(Int, read(ops, ULEB128))
-        off = convert(Int, read(ops, SLEB128))*cie.data_align
-        s[reg] = Offset(off, false)
-    elseif op == DWARF.DW_CFA_val_offset
-        reg = convert(Int, read(ops, ULEB128))
-        off = convert(Int, read(ops, ULEB128))*cie.data_align
-        s[reg] = Offset(off, true)
-    elseif op == DWARF.DW_CFA_val_offset_sf
-        reg = convert(Int, read(ops, ULEB128))
-        off = convert(Int, read(ops, SLEB128))*cie.data_align
-        s[reg] = Offset(off, true)
+        s[opops[1]] = Offset(opops[2]*cie.data_align, false)
+    elseif op == DWARF.DW_CFA_offset_extended || op == DWARF.DW_CFA_offset_extended_sf
+    # Note, we assume here that DW_CFA_offset_extended uses a factored offset
+    # even though the DWARF specification does not clearly state this.
+        s[opops[1]] = Offset(opops[2]*cie.data_align, false)
+    elseif op == DWARF.DW_CFA_val_offset || op == op == DWARF.DW_CFA_val_offset_sf
+        s[opops[1]] = Offset(opops[2]*cie.data_align, true)
     elseif op == DWARF.DW_CFA_register
-        reg_dst = convert(Int, read(ops, ULEB128))
-        reg_stc = convert(Int, read(ops, ULEB128))
-        s[reg_dst] = Reg(reg_src)
+        s[opops[1]] = Reg(opops[2])
     elseif op == DWARF.DW_CFA_expression ||
            op == DWARF.DW_CFA_val_expression
         error()
@@ -191,8 +223,33 @@ function interpret_op(s :: RegStates, ops, cie :: CIE)
     else
         error("unknown CFA opcode $op")
     end
-#    @show s
 end
+
+function dump_program(out::IO, eh_frame::SectionRef, x::FDE, cie::CIE; bytes = false)
+    seek(eh_frame, x.offset)
+    length = read(eh_frame, UInt32)
+    (length == ~UInt32(0)) && (length = read(eh_frame, UInt64))
+    startpos = position(eh_frame)
+    # sizeof(CIE_id) == sizeof(length)
+    seek(eh_frame, position(eh_frame) + sizeof(length) + 2sizeof(readtype(cie.addr_format)))
+    bytes && (return read(eh_frame, UInt8, startpos + length - position(eh_frame)))
+    while position(eh_frame) < startpos + length
+        op = read(eh_frame, UInt8)
+        opcode = (op & 0xc0) != 0 ? (op & 0xc0) : op
+        print_with_color(:blue, out, DWARF.DW_CFA[opcode])
+        for operand in operands(eh_frame, op, readtype(cie.addr_format))
+            print(out, ' ')
+            if isa(operand, Array)
+                DWARF.Expressions.print_expression(out,
+                    readtype(cie.addr_format), operand, :NativeEndian)
+            else
+                print(out, operand)
+            end
+        end
+        println(out)
+    end
+end
+
 
 function read(oh::ObjectHandle, ::Type{Entry}, fr :: FrameRecord, sect_offset :: Int)
     len = read(oh, UInt32)
@@ -233,6 +290,8 @@ function read(oh::ObjectHandle, ::Type{Entry}, fr :: FrameRecord, sect_offset ::
                     read(oh, UInt8) # TODO use that maybe
                 elseif augment[i] == 'P'
                     read(oh, readtype(AddrFormat(read(oh, UInt8)))) # TODO ditto
+                elseif augment[i] == 'S'
+                    # TODO: ditto (represents a signal frame)
                 else
                     warn("unknown augment data '$(Char(augment[i]))' in '$(bytestring(augment))'")
                 end
@@ -252,13 +311,13 @@ function read(oh::ObjectHandle, ::Type{Entry}, fr :: FrameRecord, sect_offset ::
     end
 end
 
-function read(x :: DebugSections, ::Type{FrameRecord})
-    oh = x.oh
-    seek(x.eh_frame)
+function read(eh_frame::SectionRef, ::Type{FrameRecord})
+    oh = handle(eh_frame)
+    seek(eh_frame)
     sect_offset = position(oh)
     cies = Array(CIE, 0)
     fdes = Array(FDE, 0)
-    fr = FrameRecord(ELF.sectionaddress(x.eh_frame), cies, fdes)
+    fr = FrameRecord(sectionaddress(eh_frame), cies, fdes)
     while true
         entry = read(oh, Entry, fr, sect_offset)
         if isa(entry, CIE)
@@ -271,32 +330,6 @@ function read(x :: DebugSections, ::Type{FrameRecord})
     end
     fr
 end
-
-function interpret!(rs, code, cie, target)
-    ops = IOBuffer(code)
-    while !eof(ops) && rs.delta < target
-        interpret_op(rs, ops, cie)
-    end
-end
-function interpret!(fde, target)
-    rs = RegStates()
-    interpret!(rs, fde.cie.initial_code, fde.cie, target)
-    interpret!(rs, fde.code, fde.cie, target)
-    rs
-end
-function interp_all(fr)
-    for fde in fr.fdes
-        rs = RegStates()
-        interpret!(rs, fde.cie.initial_code, fde.cie)
-        println(" ==== ")
-        interpret!(rs, fde.code, fde.cie)
-        println(" ================= ")
-    end
-end
-
-tag(d::DIETreeRef) = tag(d.tree)
-children(d::DIETreeRef) = map(c->DIETreeRef(d.dbgs, d.strtab, c), children(d.tree))
-attributes(d::DIETreeRef) = attributes(d.tree)
 
 
 end

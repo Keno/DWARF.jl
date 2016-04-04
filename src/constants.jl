@@ -472,40 +472,6 @@ end
     const DW_MACINFO_vendor_ext = 0xff #
 end
 
-@constants DW_CFA "" begin
-    const DW_CFA_nop = 0x00
-    const DW_CFA_set_loc = 0x01
-    const DW_CFA_advance_loc1 = 0x02
-    const DW_CFA_advance_loc2 = 0x03
-    const DW_CFA_advance_loc4 = 0x04
-    const DW_CFA_offset_extended = 0x05
-    const DW_CFA_restore_extended = 0x06
-    const DW_CFA_undefined = 0x07
-    const DW_CFA_same_value = 0x08
-    const DW_CFA_register = 0x09
-    const DW_CFA_remember_state = 0x0a
-    const DW_CFA_restore_state = 0x0b
-    const DW_CFA_def_cfa = 0x0c
-    const DW_CFA_def_cfa_register = 0x0d
-    const DW_CFA_def_cfa_offset = 0x0e
-    const DW_CFA_def_cfa_expression = 0x0f
-    const DW_CFA_expression = 0x10
-    const DW_CFA_offset_extended_sf = 0x11
-    const DW_CFA_def_cfa_sf = 0x12
-    const DW_CFA_def_cfa_offset_sf = 0x13
-    const DW_CFA_val_offset = 0x14
-    const DW_CFA_val_offset_sf = 0x15
-    const DW_CFA_val_expression = 0x16
-    const DW_CFA_lo_user = 0x1c
-    const DW_CFA_GNU_window_save = 0x2d
-    const DW_CFA_GNU_args_size = 0x2e
-    const DW_CFA_GNU_negative_offset_extended = 0x2f
-    const DW_CFA_hi_user = 0x3f
-    # first argument in opcode
-    const DW_CFA_advance_loc = 0x40
-    const DW_CFA_offset = 0x80
-end
-
 @constants DW_EH_PE "" begin
     # base
     const DW_EH_PE_absptr = 0x00
@@ -526,4 +492,35 @@ end
     const DW_EH_PE_funcrel = 0x40
     const DW_EH_PE_aligned = 0x50
     const DW_EH_PE_indirect = 0x80
+end
+
+@constants DW_CFA "" begin
+    const DW_CFA_advance_loc        = 0x40 # + arbitrary lower bits
+    const DW_CFA_offset             = 0x80 # + arbitrary lower bits
+    const DW_CFA_restore            = 0xc0 # + arbitrary lower bits
+    const DW_CFA_nop                = 0x00
+    const DW_CFA_set_loc            = 0x01
+    const DW_CFA_advance_loc1       = 0x02
+    const DW_CFA_advance_loc2       = 0x03
+    const DW_CFA_advance_loc4       = 0x04
+    const DW_CFA_offset_extended    = 0x05
+    const DW_CFA_restore_extended   = 0x06
+    const DW_CFA_undefined          = 0x07
+    const DW_CFA_same_value         = 0x08
+    const DW_CFA_register           = 0x09
+    const DW_CFA_remember_state     = 0x0a
+    const DW_CFA_restore_state      = 0x0b
+    const DW_CFA_def_cfa            = 0x0c
+    const DW_CFA_def_cfa_register   = 0x0d
+    const DW_CFA_def_cfa_offset     = 0x0e
+    const DW_CFA_def_cfa_expression = 0x0f
+    const DW_CFA_expression         = 0x10
+    const DW_CFA_offset_extended_sf = 0x11
+    const DW_CFA_def_cfa_sf         = 0x12
+    const DW_CFA_def_cfa_offset_sf  = 0x13
+    const DW_CFA_val_offset         = 0x14
+    const DW_CFA_val_offset_sf      = 0x15
+    const DW_CFA_val_expression     = 0x16
+    const DW_CFA_lo_user            = 0x1c
+    const DW_CFA_hi_user            = 0x3f
 end
