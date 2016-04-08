@@ -15,6 +15,119 @@ function read_cstring(io)
     a
 end
 
+# Reference type
+
+immutable FDERef
+    eh_frame::SectionRef
+    offset::UInt
+    # Distinguish between FDEs in eh_frame (true) or debug_frame
+    is_eh_not_debug::Bool
+end
+
+immutable CIERef
+    eh_frame::SectionRef
+    offset::UInt
+end
+
+
+# Dwarf encoding
+immutable DataRel; ptr; end
+immutable PcRel; ptr; end
+
+function encoding_type(encoding)
+    data_enc = (encoding & 0xf)
+    if data_enc == DWARF.DW_EH_PE_uleb128
+        return ULEB128
+    elseif data_enc == DWARF.DW_EH_PE_udata2
+        return UInt16
+    elseif data_enc == DWARF.DW_EH_PE_udata4
+        return UInt32
+    elseif data_enc == DWARF.DW_EH_PE_udata8
+        return UInt64
+    elseif data_enc == DWARF.DW_EH_PE_sleb128
+        return SLEB128
+    elseif data_enc == DWARF.DW_EH_PE_sdata2
+        return Int16
+    elseif data_enc == DWARF.DW_EH_PE_sdata4
+        return Int32
+    elseif data_enc == DWARF.DW_EH_PE_sdata8
+        return Int64
+    else
+        error("Unknown encoding type")
+    end
+end
+        
+
+function read_encoded(io, encoding)
+    (encoding == DWARF.DW_EH_PE_omit) && return nothing
+    res = read(io, encoding_type(encoding))
+    base_enc = encoding & 0xf0
+    (base_enc == DWARF.DW_EH_PE_datarel) ? DataRel(res) :
+        (base_enc == DWARF.DW_EH_PE_pcrel) ? PcRel(res) :
+        (@assert base_enc == DWARF.DW_EH_PE_absptr; res)
+end
+
+typealias Encoded Union{Integer, DataRel, PcRel}
+
+# eh_frame_hdr parsing
+immutable eh_frame_hdr
+    eh_frame_ptr::Encoded
+    fde_count::UInt
+    table_offset::UInt
+    table_enc::UInt8
+end
+
+function read(io::SectionRef, ::Type{eh_frame_hdr})
+    seekstart(io)
+    version = read(io, UInt8)
+    @assert version == 1
+    eh_frame_ptr_enc = read(io, UInt8)
+    fde_count_enc = read(io, UInt8)
+    table_enc = read(io, UInt8)
+    eh_frame_ptr = read_encoded(io, eh_frame_ptr_enc)
+    fde_count = UInt(read_encoded(io, fde_count_enc))
+    eh_frame_hdr(eh_frame_ptr, fde_count, position(io), table_enc)
+end
+
+immutable EhFrameRef <: Base.AbstractArray{Tuple,1}
+    header::eh_frame_hdr
+    hdr_sec::SectionRef
+    frame_sec::SectionRef
+end
+EhFrameRef(hdr_sec::SectionRef, frame_sec::SectionRef) =
+    EhFrameRef(read(hdr_sec, eh_frame_hdr), hdr_sec, frame_sec)
+Base.length(ehfr::EhFrameRef) = Int(ehfr.header.fde_count)
+Base.size(ehfr::EhFrameRef) = (length(ehfr),)
+
+function compute_entry_type(ehfr)
+    enc = ehfr.header.table_enc
+    # First check that the encoding is indeed datarel
+    @assert (enc & 0xf0) == DWARF.DW_EH_PE_datarel
+    entry_field_T = encoding_type(enc)
+    # We also require fixed-size entries, otherwise we can't really binary search
+    @assert !isa(entry_field_T, DWARF.LEB128)
+    entry_field_T
+end
+
+seekentry(ehfr, idx, entry_size=2sizeof(compute_entry_type(ehfr))) =
+    seek(ehfr.hdr_sec, ehfr.header.table_offset + (idx-1)*entry_size)
+function Base.getindex(ehdr::EhFrameRef, idx, entry_type=compute_entry_type(ehdr))
+    seekentry(ehdr, idx, 2sizeof(entry_type))
+    (read(ehdr.hdr_sec, entry_type), read(ehdr.hdr_sec, entry_type))
+end
+
+"""
+Searches for an FDE covering an ip, represented as an offset from the start
+of the eh_frame_hdr section
+"""
+function search_fde_offset(hdr::EhFrameRef, offset)
+    found_idx = searchsortedlast(hdr, (offset, 0),by = x->x[1])
+    (found_idx == hdr.header.fde_count+1) && error("Not found")
+    FDERef(hdr.frame_sec, sectionoffset(hdr.hdr_sec) - 
+        sectionoffset(hdr.frame_sec) + hdr[found_idx][2], true)
+end
+
+# eh_frame parsing
 immutable Undef
 end
 immutable Same
@@ -68,7 +181,6 @@ function readtype(fmt::AddrFormat)
 end
 abstract Entry
 immutable CIE <: Entry
-    fr
     offset :: UInt
     code_align :: Int
     data_align :: Int
@@ -225,15 +337,17 @@ function evaluage_op(s :: RegStates, ops, cie :: CIE)
     end
 end
 
-function dump_program(out::IO, eh_frame::SectionRef, x::FDE, cie::CIE; bytes = false)
-    seek(eh_frame, x.offset)
-    length = read(eh_frame, UInt32)
-    (length == ~UInt32(0)) && (length = read(eh_frame, UInt64))
-    startpos = position(eh_frame)
-    # sizeof(CIE_id) == sizeof(length)
-    seek(eh_frame, position(eh_frame) + sizeof(length) + 2sizeof(readtype(cie.addr_format)))
-    bytes && (return read(eh_frame, UInt8, startpos + length - position(eh_frame)))
-    while position(eh_frame) < startpos + length
+function realize(ref::CIERef)
+    @show ref.offset
+    seek(ref.eh_frame, ref.offset)
+    @show position(handle(ref.eh_frame))
+    @show Int(sectionoffset(ref.eh_frame))
+    read(handle(ref.eh_frame), Entry, Int(sectionoffset(ref.eh_frame)))
+end
+
+function _dump_program(out, eh_frame, endpos, cie, bytes = false)
+    bytes && (return read(eh_frame, UInt8, endpos - position(eh_frame)))
+    while position(eh_frame) < endpos
         op = read(eh_frame, UInt8)
         opcode = (op & 0xc0) != 0 ? (op & 0xc0) : op
         print_with_color(:blue, out, DWARF.DW_CFA[opcode])
@@ -250,8 +364,33 @@ function dump_program(out::IO, eh_frame::SectionRef, x::FDE, cie::CIE; bytes = f
     end
 end
 
+function dump_program(out::IO, fde::FDERef; bytes = false)
+    eh_frame = fde.eh_frame
+    seek(eh_frame, fde.offset)
+    length = read(eh_frame, UInt32)
+    (length == ~UInt32(0)) && (length = read(eh_frame, UInt64))
+    startpos = position(eh_frame)
+    # Obtain CIERef
+    CIE_pointer = read(eh_frame, typeof(length))
+    cie = CIERef(eh_frame, fde.is_eh_not_debug ?
+        startpos - CIE_pointer : CIE_pointer)
+    cie = realize(cie)
+    seek(eh_frame, startpos + sizeof(length) + 2sizeof(readtype(cie.addr_format)))
+    _dump_program(out, eh_frame, startpos + length, cie, bytes)
+end
 
-function read(oh::ObjectHandle, ::Type{Entry}, fr :: FrameRecord, sect_offset :: Int)
+function dump_program(out::IO, eh_frame::SectionRef, x::FDE, cie::CIE; bytes = false)
+    seek(eh_frame, x.offset)
+    length = read(eh_frame, UInt32)
+    (length == ~UInt32(0)) && (length = read(eh_frame, UInt64))
+    startpos = position(eh_frame)
+    # sizeof(CIE_id) == sizeof(length)
+    seek(eh_frame, startpos + sizeof(length) + 2sizeof(readtype(cie.addr_format)))
+    _dump_program(out, eh_frame, startpos + length, cie, bytes)
+end
+
+
+function Base.read(oh::ObjectHandle, ::Type{Entry}, sect_offset :: Int)
     len = read(oh, UInt32)
     len > 0 || return nothing
     beg_pos = position(oh)
@@ -299,7 +438,7 @@ function read(oh::ObjectHandle, ::Type{Entry}, fr :: FrameRecord, sect_offset ::
             seek(oh, augment_length + a_pos)
         end
         code = read(oh, UInt8, len - (position(oh) - beg_pos))
-        CIE(fr, offset, code_align, data_align, AddrFormat(addr_format), return_reg, code)
+        CIE(offset, code_align, data_align, AddrFormat(addr_format), return_reg, code)
     else # FDE
         cie_offset = UInt(beg_pos - id - sect_offset)
         cie = fr.cies[findfirst(cie -> cie.offset == cie_offset, fr.cies)]
