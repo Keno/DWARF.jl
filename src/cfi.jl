@@ -15,6 +15,8 @@ function read_cstring(io)
     a
 end
 
+export realize_cie, initial_loc
+
 # Reference type
 
 immutable FDERef
@@ -56,7 +58,7 @@ function encoding_type(encoding)
         error("Unknown encoding type")
     end
 end
-        
+
 
 function read_encoded(io, encoding)
     (encoding == DWARF.DW_EH_PE_omit) && return nothing
@@ -113,7 +115,9 @@ seekentry(ehfr, idx, entry_size=2sizeof(compute_entry_type(ehfr))) =
     seek(ehfr.hdr_sec, ehfr.header.table_offset + (idx-1)*entry_size)
 function Base.getindex(ehdr::EhFrameRef, idx, entry_type=compute_entry_type(ehdr))
     seekentry(ehdr, idx, 2sizeof(entry_type))
-    (read(ehdr.hdr_sec, entry_type), read(ehdr.hdr_sec, entry_type))
+    ip = read(ehdr.hdr_sec, entry_type)
+    offset = read(ehdr.hdr_sec, entry_type)
+    (ip, offset)
 end
 
 """
@@ -122,12 +126,21 @@ of the eh_frame_hdr section
 """
 function search_fde_offset(hdr::EhFrameRef, offset)
     found_idx = searchsortedlast(hdr, (offset, 0),by = x->x[1])
-    (found_idx == hdr.header.fde_count+1) && error("Not found")
-    FDERef(hdr.frame_sec, sectionoffset(hdr.hdr_sec) - 
+    (found_idx == 0) && error("Not found")
+    FDERef(hdr.frame_sec, sectionoffset(hdr.hdr_sec) -
         sectionoffset(hdr.frame_sec) + hdr[found_idx][2], true)
 end
 
 # eh_frame parsing
+immutable RegNum
+    num::UInt64
+end
+function Base.print(io::IO, r::RegNum)
+    print(io, "%", (isa(io,IOContext) && haskey(io,:reg_map)) ?
+        get(io,:reg_map,:unknown)[r.num] : r.num)
+end
+Base.convert(::Type{Int}, r::RegNum) = Int(r.num)
+
 immutable Undef
 end
 immutable Same
@@ -146,12 +159,14 @@ end
 typealias RegState Union{Undef,Same,Offset,Expr,Reg}
 type RegStates
     values :: Dict{Int,RegState}
-    cfa :: Union{Tuple{Int,Int},Expr,Undef} # either (reg,offset) or a DWARF expr
+    stack :: Vector{Dict{Int,RegState}}
+    cfa :: Union{Tuple{RegNum,Int},Expr,Undef} # either (reg,offset) or a DWARF expr
     delta :: Int
 end
-RegStates() = RegStates(Dict{Int,RegState}(), Undef(), 0)
+RegStates() = RegStates(Dict{Int,RegState}(), Vector{Dict{Int,RegState}}(), Undef(), 0)
 Base.getindex(s :: RegStates, n) = get(s.values, n, Undef())
-Base.setindex!(s :: RegStates, val::RegState, n :: Int) = isa(val,Undef) ? delete!(s.values, n) : s.values[n] = val
+Base.setindex!(s :: RegStates, val::RegState, n :: Union{Int, RegNum}) =
+    isa(val,Undef) ? delete!(s.values, Int(n)) : s.values[Int(n)] = val
 Base.convert(::Type{Int}, x::Union{SLEB128,ULEB128}) = convert(Int,convert(BigInt,x))
 function Base.show(io::IO, s :: RegStates)
     print(io, "RegStates [", s.delta, "] cfa: ")
@@ -165,26 +180,12 @@ function Base.show(io::IO, s :: RegStates)
     end
 end
 Base.show(io::IO, o::Offset) = @printf(io, "%s(cfa+ %#x)", o.is_val ? "" : "*", o.n)
-immutable AddrFormat
-    base :: UInt8
-    mod :: UInt8
-end
-AddrFormat(x::UInt8) = AddrFormat(x & 0x0f, x & 0xf0)
-function readtype(fmt::AddrFormat)
-    if fmt.base == DWARF.DW_EH_PE_absptr
-        UInt
-    elseif fmt.base == DWARF.DW_EH_PE_sdata4
-        Int32
-    else
-        error("Unknown read type $fmt")
-    end
-end
 abstract Entry
 immutable CIE <: Entry
     offset :: UInt
     code_align :: Int
     data_align :: Int
-    addr_format :: AddrFormat
+    addr_format :: UInt8
     return_reg :: UInt8
     initial_code :: Vector{UInt8}
 end
@@ -209,7 +210,6 @@ function Base.show(io::IO, fr :: FrameRecord)
         println(io, e)
     end
 end
-Base.show(io::IO, fmt::AddrFormat) = print(io, "(", DWARF.DW_EH_PE[fmt.base], " : ", DWARF.DW_EH_PE[fmt.mod], ")")
 function Base.show(io::IO, cie::CIE)
     @printf(io, "CIE[%#x] align (code:%#x data:%#x) (addr format %s) %d bytes of instructions", cie.offset, cie.code_align, cie.data_align, cie.addr_format, length(cie.initial_code))
 end
@@ -225,10 +225,6 @@ function absolute_initial_loc(fde::FDE)
     end
 end
 
-immutable RegNum
-    num::UInt64
-end
-
 function operands(ops, opcode, addrT)
     if opcode == DWARF.DW_CFA_nop || opcode == DWARF.DW_CFA_remember_state ||
             opcode == DWARF.DW_CFA_restore_state
@@ -237,7 +233,7 @@ function operands(ops, opcode, addrT)
             (opcode & 0xc0) == DWARF.DW_CFA_restore
         return (opcode & ~0xc0,)
     elseif (opcode & 0xc0) == DWARF.DW_CFA_offset
-        return (opcode & ~0xc0, UInt(read(ops, ULEB128)))
+        return (RegNum(opcode & ~0xc0), UInt(read(ops, ULEB128)))
     elseif opcode == DWARF.DW_CFA_set_loc
         return (read(ops, addrT),)
     elseif opcode == DWARF.DW_CFA_advance_loc1
@@ -288,32 +284,31 @@ end
 
 function evaluage_op(s :: RegStates, ops, cie :: CIE)
     op = read(ops, UInt8)
-    #    @show op
     # Section 6.4.2 of DWARF 4
-    opops = opreands(ops, opcode, UInt64)
+    opops = operands(ops, op, UInt64)
     if op == DWARF.DW_CFA_set_loc                 # 6.4.2.1 Row creation
         error()
     elseif (op & 0xc0) == DWARF.DW_CFA_advance_loc || op == DWARF.DW_CFA_advance_loc1 ||
             op == DWARF.DW_CFA_advance_loc2 || op == DWARF.DW_CFA_advance_loc4
         s.delta += opops[1] * cie.code_align
     elseif op == DWARF.DW_CFA_def_cfa             # 6.4.2.2 CFA definitions
-        s.cfa = opops
+        s.cfa = (opops[1], Int(opops[2]))
     elseif op == DWARF.DW_CFA_def_cfa_sf
-        s.cfa = (opops[1], opops[2]*cie.data_align)
+        s.cfa = (opops[1], Int(opops[2]*cie.data_align))
     elseif op == DWARF.DW_CFA_def_cfa_register
         s.cfa = (opops[1], s.cfa[2])
     elseif op == DWARF.DW_CFA_def_cfa_offset
-        s.cfa = (s.cfa[1], opops[1])
+        s.cfa = (s.cfa[1], Int(opops[1]))
     elseif op == DWARF.DW_CFA_def_cfa_offset_sf
-        s.cfa = (s.cfa[1], opops[1]*cie.data_align)
+        s.cfa = (s.cfa[1], Int(opops[1]*cie.data_align))
     elseif op == DWARF.DW_CFA_def_cfa_expression
-        s.cfa = opops[1]
+        s.cfa = Expr(opops[1], false)
     elseif op == DWARF.DW_CFA_undefined           # 6.4.2.3 Register rules
         s[opops[1]] = Undef()
     elseif op == DWARF.DW_CFA_same_value
         s[opops[1]] = Same()
     elseif (op & 0xc0) == DWARF.DW_CFA_offset
-        s[opops[1]] = Offset(opops[2]*cie.data_align, false)
+        s[opops[1]] = Offset(Int(opops[2])*cie.data_align, false)
     elseif op == DWARF.DW_CFA_offset_extended || op == DWARF.DW_CFA_offset_extended_sf
     # Note, we assume here that DW_CFA_offset_extended uses a factored offset
     # even though the DWARF specification does not clearly state this.
@@ -328,9 +323,10 @@ function evaluage_op(s :: RegStates, ops, cie :: CIE)
     elseif op == DWARF.DW_CFA_restore ||
            op == DWARF.DW_CFA_restore_extended
         error()
-    elseif op == DWARF.DW_CFA_remember_state ||   # 6.4.2.4 Row state
-           op == DWARF.DW_CFA_restore_state
-        error()
+    elseif op == DWARF.DW_CFA_remember_state    # 6.4.2.4 Row state
+        push!(s.stack, copy(s.values))
+    elseif op == DWARF.DW_CFA_restore_state
+        s.values = pop!(s.stack)
     elseif op == DWARF.DW_CFA_nop                 # 6.4.2.5 Padding
     else
         error("unknown CFA opcode $op")
@@ -338,24 +334,21 @@ function evaluage_op(s :: RegStates, ops, cie :: CIE)
 end
 
 function realize(ref::CIERef)
-    @show ref.offset
     seek(ref.eh_frame, ref.offset)
-    @show position(handle(ref.eh_frame))
-    @show Int(sectionoffset(ref.eh_frame))
     read(handle(ref.eh_frame), Entry, Int(sectionoffset(ref.eh_frame)))
 end
 
-function _dump_program(out, eh_frame, endpos, cie, bytes = false)
+function _dump_program(out, bytes, eh_frame, endpos, cie)
     bytes && (return read(eh_frame, UInt8, endpos - position(eh_frame)))
     while position(eh_frame) < endpos
         op = read(eh_frame, UInt8)
         opcode = (op & 0xc0) != 0 ? (op & 0xc0) : op
         print_with_color(:blue, out, DWARF.DW_CFA[opcode])
-        for operand in operands(eh_frame, op, readtype(cie.addr_format))
+        for operand in operands(eh_frame, op, encoding_type(cie.addr_format))
             print(out, ' ')
             if isa(operand, Array)
                 DWARF.Expressions.print_expression(out,
-                    readtype(cie.addr_format), operand, :NativeEndian)
+                    encoding_type(cie.addr_format), operand, :NativeEndian)
             else
                 print(out, operand)
             end
@@ -364,20 +357,60 @@ function _dump_program(out, eh_frame, endpos, cie, bytes = false)
     end
 end
 
-function dump_program(out::IO, fde::FDERef; bytes = false)
+function _prepare_program(f, fde::FDERef, cie = nothing)
     eh_frame = fde.eh_frame
     seek(eh_frame, fde.offset)
     length = read(eh_frame, UInt32)
     (length == ~UInt32(0)) && (length = read(eh_frame, UInt64))
     startpos = position(eh_frame)
-    # Obtain CIERef
-    CIE_pointer = read(eh_frame, typeof(length))
-    cie = CIERef(eh_frame, fde.is_eh_not_debug ?
-        startpos - CIE_pointer : CIE_pointer)
-    cie = realize(cie)
-    seek(eh_frame, startpos + sizeof(length) + 2sizeof(readtype(cie.addr_format)))
-    _dump_program(out, eh_frame, startpos + length, cie, bytes)
+    if cie == nothing
+        # Obtain CIERef
+        CIE_pointer = read(eh_frame, typeof(length))
+        cie = CIERef(eh_frame, fde.is_eh_not_debug ?
+            startpos - CIE_pointer : CIE_pointer)
+        cie = realize(cie)
+    end
+    seek(eh_frame, startpos + sizeof(length) + 2sizeof(encoding_type(cie.addr_format)))
+    augment_length = UInt(read(eh_frame, ULEB128))
+    seek(eh_frame, position(eh_frame) + augment_length)
+    f(eh_frame, startpos + length, cie, augment_length)
 end
+realize_cie(fde) = _prepare_program((a,b,cie,augment_length)->cie, fde)
+
+"""
+Returns the inital ip as a module-relative offset.
+"""
+initial_loc(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, augment_length
+    pos = position(eh_frame)-2sizeof(encoding_type(cie.addr_format))-augment_length-1
+    seek(eh_frame, pos)
+    pos = position(handle(eh_frame))
+    enc = read_encoded(eh_frame, cie.addr_format)
+    if isa(enc, PcRel)
+        enc = pos + Int64(enc.ptr)
+    end
+    enc
+end
+
+"""
+Returns the final ip as a module-relative offset.
+"""
+fde_range(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, augment_length
+    pos = position(eh_frame)-2sizeof(encoding_type(cie.addr_format))-augment_length-1
+    seek(eh_frame, pos)
+    read_encoded(eh_frame, cie.addr_format)
+    enc = read_encoded(eh_frame, cie.addr_format)
+    if isa(enc, PcRel) # The modifier does not apply to the range
+        enc = enc.ptr
+    end
+    enc
+end
+
+dump_program(out::IO, fde::FDERef; cie = nothing, bytes = false) =
+    _prepare_program((a,b,c,_)->_dump_program(out, bytes, a,b,c), fde, cie)
+
+dump_program(out, cie::CIE; bytes = false) =
+    _dump_program(out,  bytes, IOBuffer(cie.initial_code),
+        length(cie.initial_code), cie)
 
 function dump_program(out::IO, eh_frame::SectionRef, x::FDE, cie::CIE; bytes = false)
     seek(eh_frame, x.offset)
@@ -385,10 +418,26 @@ function dump_program(out::IO, eh_frame::SectionRef, x::FDE, cie::CIE; bytes = f
     (length == ~UInt32(0)) && (length = read(eh_frame, UInt64))
     startpos = position(eh_frame)
     # sizeof(CIE_id) == sizeof(length)
-    seek(eh_frame, startpos + sizeof(length) + 2sizeof(readtype(cie.addr_format)))
+    seek(eh_frame, startpos + sizeof(length) + 2sizeof(encoding_type(cie.addr_format)))
     _dump_program(out, eh_frame, startpos + length, cie, bytes)
 end
 
+function evaluate_program(code::Union{IO, SectionRef}, target,
+        cie, rs = RegStates(), maxpos = (-1 % UInt))
+    while !eof(code) && position(code) < maxpos && rs.delta <= target
+        evaluage_op(rs, code, cie)
+    end
+    rs
+end
+
+function evaluate_program(fde::FDERef, target; cie = nothing)
+    _prepare_program(fde, cie) do eh_frame, endpos, cie, augment_length
+        rs = RegStates()
+        evaluate_program(IOBuffer(cie.initial_code), target, cie, rs)
+        evaluate_program(eh_frame, target, cie, rs, endpos)
+        rs
+    end
+end
 
 function Base.read(oh::ObjectHandle, ::Type{Entry}, sect_offset :: Int)
     len = read(oh, UInt32)
@@ -401,9 +450,6 @@ function Base.read(oh::ObjectHandle, ::Type{Entry}, sect_offset :: Int)
     id = read(oh, UInt32)
     if id == 0 # CIE
         version = read(oh, UInt8)
-        if version != 1
-            error("unsupported frame record version : $version")
-        end
         augment = read_cstring(oh)
         has_augment_data = false
         has_eh_data = false
@@ -428,7 +474,7 @@ function Base.read(oh::ObjectHandle, ::Type{Entry}, sect_offset :: Int)
                 elseif augment[i] == 'L'
                     read(oh, UInt8) # TODO use that maybe
                 elseif augment[i] == 'P'
-                    read(oh, readtype(AddrFormat(read(oh, UInt8)))) # TODO ditto
+                    read_encoded(oh, read(oh, UInt8)) # TODO ditto
                 elseif augment[i] == 'S'
                     # TODO: ditto (represents a signal frame)
                 else
@@ -438,13 +484,12 @@ function Base.read(oh::ObjectHandle, ::Type{Entry}, sect_offset :: Int)
             seek(oh, augment_length + a_pos)
         end
         code = read(oh, UInt8, len - (position(oh) - beg_pos))
-        CIE(offset, code_align, data_align, AddrFormat(addr_format), return_reg, code)
+        CIE(offset, code_align, data_align, addr_format, return_reg, code)
     else # FDE
         cie_offset = UInt(beg_pos - id - sect_offset)
         cie = fr.cies[findfirst(cie -> cie.offset == cie_offset, fr.cies)]
-        loc_type = readtype(cie.addr_format)
-        initial_loc = read(oh, loc_type)
-        range = read(oh, loc_type)
+        initial_loc = read_encoded(oh, cie.addr_format)
+        range = read_encoded(oh, cie.addr_format)
         code = read(oh, UInt8, len - (position(oh) - beg_pos))
         FDE(offset, cie, initial_loc, range, code)
     end

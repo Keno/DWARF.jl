@@ -409,6 +409,8 @@ module DWARF
             elseif opcode == DWARF.DW_OP_minus
                 top = pop!(s.stack)
                 push!(s.stack,pop!(s.stack)%top)
+            elseif opcode == DWARF.DW_OP_plus
+                push!(s.stack,pop!(s.stack)+pop!(s.stack))
             elseif opcode == DWARF.DW_OP_mul
                 push!(s.stack,pop!(s.stack)*pop!(s.stack))
             elseif opcode == DWARF.DW_OP_neg
@@ -458,7 +460,7 @@ module DWARF
             elseif opcode == DWARF.DW_OP_call2 || opcode == DWARF.DW_OP_call4 || opcode == DWARF.DW_OP_call_ref
                 error("Unimplemented")
             elseif opcode >= DWARF.DW_OP_lit1 && opcode <= DWARF.DW_OP_lit31
-                push!(s.stack,opcode-DW_OP_lit1+1)
+                push!(s.stack,opcode-DWARF.DW_OP_lit1+1)
             elseif opcode >= DWARF.DW_OP_breg0 && opcode <= DWARF.DW_OP_breg31
                 (i,offset) = operands(T,opcode,opcodes,i,endianness)
                 push!(s.stack,getreg_func(opcode-DWARF.DW_OP_breg0) + offset)
