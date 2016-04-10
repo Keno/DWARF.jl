@@ -1122,4 +1122,5 @@ module DWARF
     end
 
     include("navigate.jl")
+    include("cfi.jl")
 end #module

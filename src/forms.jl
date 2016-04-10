@@ -19,7 +19,7 @@ end
 convert{T}(::Type{Nullable{T}}, at::Attribute) = Nullable{T}(convert(T,at))
 convert{T}(::Type{Ref{T}}, at::Attribute) = RefValue{T}(convert(T,at))
 convert(::Type{Nullable{Attribute}}, at::Attribute) = Nullable{T}(at)
-convert{T}(::Type{T},at::Attribute) = convert(T, at.value)
+convert{T<:Integer}(::Type{T},at::Attribute) = convert(T, at.value)
 convert(::Type{Attribute},at::Attribute) = at
 
 
