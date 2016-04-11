@@ -3,7 +3,6 @@ module CallFrameInfo
 using DWARF
 using DWARF: SLEB128, ULEB128
 import DWARF.tag, DWARF.children, DWARF.attributes
-using ELF
 using ObjFileBase
 using ObjFileBase: DebugSections, ObjectHandle, handle
 import Base.read
@@ -15,7 +14,7 @@ function read_cstring(io)
     a
 end
 
-export realize_cie, initial_loc
+export realize_cie, initial_loc, FDEIterator
 
 # Reference type
 
@@ -124,11 +123,10 @@ end
 Searches for an FDE covering an ip, represented as an offset from the start
 of the eh_frame_hdr section
 """
-function search_fde_offset(hdr::EhFrameRef, offset)
-    found_idx = searchsortedlast(hdr, (offset, 0),by = x->x[1])
+function search_fde_offset(frame_sec, tab, offset, offs_slide = 0)
+    found_idx = searchsortedlast(tab, (offset, 0),by = x->x[1])
     (found_idx == 0) && error("Not found")
-    FDERef(hdr.frame_sec, sectionoffset(hdr.hdr_sec) -
-        sectionoffset(hdr.frame_sec) + hdr[found_idx][2], true)
+    FDERef(frame_sec, offs_slide + tab[found_idx][2], true)
 end
 
 # eh_frame parsing
@@ -157,10 +155,11 @@ immutable Reg
     n :: Int
 end
 typealias RegState Union{Undef,Same,Offset,Expr,Reg}
+typealias CFAState Union{Tuple{RegNum,Int},Expr,Undef}
 type RegStates
     values :: Dict{Int,RegState}
-    stack :: Vector{Dict{Int,RegState}}
-    cfa :: Union{Tuple{RegNum,Int},Expr,Undef} # either (reg,offset) or a DWARF expr
+    stack :: Vector{Tuple{CFAState, Dict{Int,RegState}}}
+    cfa :: CFAState # either (reg,offset) or a DWARF expr
     delta :: Int
 end
 RegStates() = RegStates(Dict{Int,RegState}(), Vector{Dict{Int,RegState}}(), Undef(), 0)
@@ -180,49 +179,15 @@ function Base.show(io::IO, s :: RegStates)
     end
 end
 Base.show(io::IO, o::Offset) = @printf(io, "%s(cfa+ %#x)", o.is_val ? "" : "*", o.n)
-abstract Entry
-immutable CIE <: Entry
-    offset :: UInt
+immutable CIE
     code_align :: Int
     data_align :: Int
     addr_format :: UInt8
     return_reg :: UInt8
     initial_code :: Vector{UInt8}
 end
-immutable FDE{LocType} <: Entry
-    offset :: UInt
-    cie :: CIE
-    initial_loc :: LocType
-    range :: LocType
-    code :: Vector{UInt8}
-end
-immutable FrameRecord
-    offset :: UInt
-    cies :: Vector{CIE}
-    fdes :: Vector{FDE}
-end
-function Base.show(io::IO, fr :: FrameRecord)
-    println(io, "call frame info :")
-    for e in fr.cies
-        println(io, e)
-    end
-    for e in fr.fdes
-        println(io, e)
-    end
-end
 function Base.show(io::IO, cie::CIE)
-    @printf(io, "CIE[%#x] align (code:%#x data:%#x) (addr format %s) %d bytes of instructions", cie.offset, cie.code_align, cie.data_align, cie.addr_format, length(cie.initial_code))
-end
-function Base.show(io::IO, fde::FDE)
-    @printf(io, "FDE[%#x] cie:%#x (addr:%#x sz:%#x) %d bytes of instructions", fde.offset, fde.cie.offset, fde.initial_loc, fde.range, length(fde.code))
-end
-
-function absolute_initial_loc(fde::FDE)
-    if fde.cie.addr_format.mod == DWARF.DW_EH_PE_pcrel
-        Int(fde.cie.fr.offset + 8 + fde.offset) + Int(fde.initial_loc) # TODO why the WORD_SIZE offset ?
-    else
-        warn("not supported pointer encoding $(fde.cie.addr_format.mod)")
-    end
+    @printf(io, "CIE align (code:%#x data:%#x) (addr format %s) %d bytes of instructions", cie.code_align, cie.data_align, cie.addr_format, length(cie.initial_code))
 end
 
 function operands(ops, opcode, addrT)
@@ -324,23 +289,37 @@ function evaluage_op(s :: RegStates, ops, cie :: CIE)
            op == DWARF.DW_CFA_restore_extended
         error()
     elseif op == DWARF.DW_CFA_remember_state    # 6.4.2.4 Row state
-        push!(s.stack, copy(s.values))
+        push!(s.stack, (copy(s.cfa), copy(s.values)))
     elseif op == DWARF.DW_CFA_restore_state
-        s.values = pop!(s.stack)
+        s.cfa, s.values = pop!(s.stack)
     elseif op == DWARF.DW_CFA_nop                 # 6.4.2.5 Padding
     else
         error("unknown CFA opcode $op")
     end
 end
 
-function realize(ref::CIERef)
-    seek(ref.eh_frame, ref.offset)
-    read(handle(ref.eh_frame), Entry, Int(sectionoffset(ref.eh_frame)))
+function read_lenid(io)
+    len = read(io, UInt32)
+    len > 0 || return next(x, position(io))
+    if len == 0xffffffff
+        len = read(io, UInt64)
+    end
+    begpos = position(io)
+    id = read(io, UInt32)
+    len, begpos, id
 end
 
-function _dump_program(out, bytes, eh_frame, endpos, cie)
+function realize(ref::CIERef)
+    seek(ref.eh_frame, ref.offset)
+    len, begpos, id = read_lenid(ref.eh_frame)
+    @assert id == 0
+    read_cie(ref.eh_frame, len)
+end
+
+function _dump_program(out, bytes, eh_frame, endpos, cie, target=0, rs = RegStates())
     bytes && (return read(eh_frame, UInt8, endpos - position(eh_frame)))
     while position(eh_frame) < endpos
+        oppos = position(eh_frame)
         op = read(eh_frame, UInt8)
         opcode = (op & 0xc0) != 0 ? (op & 0xc0) : op
         print_with_color(:blue, out, DWARF.DW_CFA[opcode])
@@ -354,7 +333,16 @@ function _dump_program(out, bytes, eh_frame, endpos, cie)
             end
         end
         println(out)
+        if target != 0
+            seek(eh_frame, oppos)
+            evaluage_op(rs, eh_frame, cie)
+            if rs.delta > target
+                print_with_color(:red, out, "--------------\n")
+                target = 0
+            end
+        end
     end
+    (target != 0 && print_with_color(:red, out, "--------------\n"))
 end
 
 function _prepare_program(f, fde::FDERef, cie = nothing)
@@ -405,22 +393,12 @@ fde_range(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, 
     enc
 end
 
-dump_program(out::IO, fde::FDERef; cie = nothing, bytes = false) =
-    _prepare_program((a,b,c,_)->_dump_program(out, bytes, a,b,c), fde, cie)
+dump_program(out::IO, fde::FDERef; cie = nothing, bytes = false, target = 0, rs = RegStates()) =
+    _prepare_program((a,b,c,_)->_dump_program(out, bytes, a,b,c, target, rs), fde, cie)
 
-dump_program(out, cie::CIE; bytes = false) =
+dump_program(out, cie::CIE; bytes = false, target = 0, rs = RegStates()) =
     _dump_program(out,  bytes, IOBuffer(cie.initial_code),
-        length(cie.initial_code), cie)
-
-function dump_program(out::IO, eh_frame::SectionRef, x::FDE, cie::CIE; bytes = false)
-    seek(eh_frame, x.offset)
-    length = read(eh_frame, UInt32)
-    (length == ~UInt32(0)) && (length = read(eh_frame, UInt64))
-    startpos = position(eh_frame)
-    # sizeof(CIE_id) == sizeof(length)
-    seek(eh_frame, startpos + sizeof(length) + 2sizeof(encoding_type(cie.addr_format)))
-    _dump_program(out, eh_frame, startpos + length, cie, bytes)
-end
+        length(cie.initial_code), cie, target, rs)
 
 function evaluate_program(code::Union{IO, SectionRef}, target,
         cie, rs = RegStates(), maxpos = (-1 % UInt))
@@ -439,81 +417,64 @@ function evaluate_program(fde::FDERef, target; cie = nothing)
     end
 end
 
-function Base.read(oh::ObjectHandle, ::Type{Entry}, sect_offset :: Int)
-    len = read(oh, UInt32)
-    len > 0 || return nothing
-    beg_pos = position(oh)
-    offset = UInt(beg_pos - sect_offset - 4)
-    if len == 0xffffffff
-        error("unsupported extended length")
-    end
-    id = read(oh, UInt32)
+immutable FDEIterator
+    eh_frame::SectionRef
+end
+Base.iteratorsize(::Type{FDEIterator}) = Base.SizeUnknown()
+Base.start(x::FDEIterator) = 0
+Base.done(x::FDEIterator, offset) = offset >= sectionsize(x.eh_frame)
+function Base.next(x::FDEIterator, offset)
+    seek(x.eh_frame, offset)
+    len, begpos, id = read_lenid(x.eh_frame)
     if id == 0 # CIE
-        version = read(oh, UInt8)
-        augment = read_cstring(oh)
-        has_augment_data = false
-        has_eh_data = false
-        addr_format = DWARF.DW_EH_PE_absptr
-        if length(augment) > 0
-            if augment[1] == 'z'
-                has_augment_data = true
-            else
-                error("can't parse augment data '$(bytestring(augment))'")
-            end
-        end
-        code_align = read(oh, ULEB128)
-        data_align = read(oh, SLEB128)
-        return_reg = read(oh, UInt8)
-        if has_augment_data
-            augment_length = convert(Int, read(oh, ULEB128))
-            a_pos = position(oh)
-            seek(oh, a_pos)
-            for i = 2:length(augment)
-                if augment[i] == 'R'
-                    addr_format = read(oh, UInt8)
-                elseif augment[i] == 'L'
-                    read(oh, UInt8) # TODO use that maybe
-                elseif augment[i] == 'P'
-                    read_encoded(oh, read(oh, UInt8)) # TODO ditto
-                elseif augment[i] == 'S'
-                    # TODO: ditto (represents a signal frame)
-                else
-                    warn("unknown augment data '$(Char(augment[i]))' in '$(bytestring(augment))'")
-                end
-            end
-            seek(oh, augment_length + a_pos)
-        end
-        code = read(oh, UInt8, len - (position(oh) - beg_pos))
-        CIE(offset, code_align, data_align, addr_format, return_reg, code)
+        return next(x, begpos + len)
     else # FDE
-        cie_offset = UInt(beg_pos - id - sect_offset)
-        cie = fr.cies[findfirst(cie -> cie.offset == cie_offset, fr.cies)]
-        initial_loc = read_encoded(oh, cie.addr_format)
-        range = read_encoded(oh, cie.addr_format)
-        code = read(oh, UInt8, len - (position(oh) - beg_pos))
-        FDE(offset, cie, initial_loc, range, code)
+        return (FDERef(x.eh_frame, offset, true), begpos+len)
     end
 end
 
-function read(eh_frame::SectionRef, ::Type{FrameRecord})
-    oh = handle(eh_frame)
-    seek(eh_frame)
-    sect_offset = position(oh)
-    cies = Array(CIE, 0)
-    fdes = Array(FDE, 0)
-    fr = FrameRecord(sectionaddress(eh_frame), cies, fdes)
-    while true
-        entry = read(oh, Entry, fr, sect_offset)
-        if isa(entry, CIE)
-            push!(cies, entry)
-        elseif isa(entry, FDE)
-            push!(fdes, entry)
+function read_cie(io, len)
+    beg_pos = position(io) - sizeof(len)
+    version = read(io, UInt8)
+    augment = read_cstring(io)
+    has_augment_data = false
+    has_eh_data = false
+    addr_format = DWARF.DW_EH_PE_absptr
+    if length(augment) > 0
+        if augment[1] == 'z'
+            has_augment_data = true
         else
-            break
+            error("can't parse augment data '$(bytestring(augment))'")
         end
     end
-    fr
+    code_align = read(io, ULEB128)
+    data_align = read(io, SLEB128)
+    return_reg = read(io, UInt8)
+    if has_augment_data
+        augment_length = convert(Int, read(io, ULEB128))
+        a_pos = position(io)
+        seek(io, a_pos)
+        for i = 2:length(augment)
+            if augment[i] == 'R'
+                addr_format = read(io, UInt8)
+            elseif augment[i] == 'L'
+                read(io, UInt8) # TODO use that maybe
+            elseif augment[i] == 'P'
+                read_encoded(io, read(io, UInt8)) # TODO ditto
+            elseif augment[i] == 'S'
+                # TODO: ditto (represents a signal frame)
+            else
+                warn("unknown augment data '$(Char(augment[i]))' in '$(bytestring(augment))'")
+            end
+        end
+        seek(io, augment_length + a_pos)
+    end
+    code = read(io, UInt8, len - (position(io) - beg_pos))
+    CIE(code_align, data_align, addr_format, return_reg, code)
 end
-
+function Base.read(io::IO, ::Type{CIE})
+    len, begpos, id = read_lenid(io)
+    read_cie(io, len)
+end
 
 end
