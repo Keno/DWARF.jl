@@ -39,6 +39,10 @@ function encoding_type(encoding)
     data_enc = (encoding & 0xf)
     if data_enc == DWARF.DW_EH_PE_uleb128
         return ULEB128
+    elseif data_enc == DWARF.DW_EH_PE_absptr
+        return Ptr{Void}
+    elseif data_enc == DWARF.DW_EH_PE_omit
+        return Void
     elseif data_enc == DWARF.DW_EH_PE_udata2
         return UInt16
     elseif data_enc == DWARF.DW_EH_PE_udata4
@@ -54,6 +58,7 @@ function encoding_type(encoding)
     elseif data_enc == DWARF.DW_EH_PE_sdata8
         return Int64
     else
+        @show data_enc
         error("Unknown encoding type")
     end
 end
@@ -126,7 +131,7 @@ of the eh_frame_hdr section
 function search_fde_offset(frame_sec, tab, offset, offs_slide = 0)
     found_idx = searchsortedlast(tab, (offset, 0),by = x->x[1])
     (found_idx == 0) && error("Not found")
-    FDERef(frame_sec, offs_slide + tab[found_idx][2], true)
+    (tab[found_idx][1], FDERef(frame_sec, offs_slide + tab[found_idx][2], true))
 end
 
 # eh_frame parsing
@@ -300,7 +305,7 @@ end
 
 function read_lenid(io)
     len = read(io, UInt32)
-    len > 0 || return next(x, position(io))
+    len > 0 || return error()
     if len == 0xffffffff
         len = read(io, UInt64)
     end

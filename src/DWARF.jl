@@ -1,4 +1,4 @@
-VERSION >= v"0.4.0-dev+6641" && __precompile__()
+__precompile__()
 module DWARF
     using ObjFileBase
     using StructIO
@@ -622,7 +622,7 @@ module DWARF
 
         function read_header(io)
             stub = unpack(io,HeaderStub)
-            standard_opcode_lengths = Array(UInt8,stub.opcode_base-1)
+            standard_opcode_lengths = Array(UInt8,max(0,stub.opcode_base-1))
             read!(io,standard_opcode_lengths)
             include_directories = UTF8String[]
             while true
