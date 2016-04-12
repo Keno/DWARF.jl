@@ -432,7 +432,7 @@ Base.iteratorsize(::Type{FDEIterator}) = Base.SizeUnknown()
 Base.done(x::FDEIterator, offset) = offset >= sectionsize(x.eh_frame)
 
 function forward_to_fde(eh_frame, offset, skipfirst = true)
-    while !eof(eh_frame)
+    while true
         seek(eh_frame, offset)
         eof(eh_frame) && break
         len, begpos, id = read_lenid(eh_frame)
