@@ -34,6 +34,7 @@ end
 # Dwarf encoding
 immutable DataRel; ptr; end
 immutable PcRel; ptr; end
+immutable Indirect; ptr; end
 
 function encoding_type(encoding)
     data_enc = (encoding & 0xf)
@@ -67,10 +68,12 @@ end
 function read_encoded(io, encoding)
     (encoding == DWARF.DW_EH_PE_omit) && return nothing
     res = read(io, encoding_type(encoding))
-    base_enc = encoding & 0xf0
-    (base_enc == DWARF.DW_EH_PE_datarel) ? DataRel(res) :
+    base_enc = encoding & 0x70
+    res = (base_enc == DWARF.DW_EH_PE_datarel) ? DataRel(res) :
         (base_enc == DWARF.DW_EH_PE_pcrel) ? PcRel(res) :
         (@assert base_enc == DWARF.DW_EH_PE_absptr; res)
+    (base_enc & 0x80 != 0) && (res = Indirect(res))
+    res
 end
 
 typealias Encoded Union{Integer, DataRel, PcRel}
@@ -426,16 +429,24 @@ immutable FDEIterator
     eh_frame::SectionRef
 end
 Base.iteratorsize(::Type{FDEIterator}) = Base.SizeUnknown()
-Base.start(x::FDEIterator) = 0
 Base.done(x::FDEIterator, offset) = offset >= sectionsize(x.eh_frame)
-function Base.next(x::FDEIterator, offset)
-    seek(x.eh_frame, offset)
-    len, begpos, id = read_lenid(x.eh_frame)
-    if id == 0 # CIE
-        return next(x, begpos + len)
-    else # FDE
-        return (FDERef(x.eh_frame, offset, true), begpos+len)
+
+function forward_to_fde(eh_frame, offset, skipfirst = true)
+    while !eof(eh_frame)
+        seek(eh_frame, offset)
+        eof(eh_frame) && break
+        len, begpos, id = read_lenid(eh_frame)
+        # Check if we found an fde
+        !skipfirst && (id != 0) && return offset
+        skipfirst = false
+        offset = begpos + len
     end
+    return offset
+end
+
+Base.start(x::FDEIterator) = forward_to_fde(x.eh_frame, 0, false)
+function Base.next(x::FDEIterator, offset)
+    return (FDERef(x.eh_frame, offset, true), forward_to_fde(x.eh_frame, offset))
 end
 
 function read_cie(io, len)
