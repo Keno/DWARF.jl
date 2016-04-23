@@ -14,7 +14,7 @@ function read_cstring(io)
     a
 end
 
-export realize_cie, initial_loc, FDEIterator
+export realize_cie, initial_loc, FDEIterator, fde_range
 
 # Reference type
 
@@ -171,6 +171,8 @@ type RegStates
     delta :: Int
 end
 RegStates() = RegStates(Dict{Int,RegState}(), Vector{Dict{Int,RegState}}(), Undef(), 0)
+Base.copy(s::RegStates) = RegStates(copy(s.values),copy(s.stack),s.cfa,s.delta)
+
 Base.getindex(s :: RegStates, n) = get(s.values, n, Undef())
 Base.setindex!(s :: RegStates, val::RegState, n :: Union{Int, RegNum}) =
     isa(val,Undef) ? delete!(s.values, Int(n)) : s.values[Int(n)] = val
@@ -202,9 +204,10 @@ function operands(ops, opcode, addrT)
     if opcode == DWARF.DW_CFA_nop || opcode == DWARF.DW_CFA_remember_state ||
             opcode == DWARF.DW_CFA_restore_state
         return ()
-    elseif (opcode & 0xc0) == DWARF.DW_CFA_advance_loc ||
-            (opcode & 0xc0) == DWARF.DW_CFA_restore
+    elseif (opcode & 0xc0) == DWARF.DW_CFA_advance_loc
         return (opcode & ~0xc0,)
+    elseif (opcode & 0xc0) == DWARF.DW_CFA_restore
+        return (RegNum(opcode & ~0xc0),)
     elseif (opcode & 0xc0) == DWARF.DW_CFA_offset
         return (RegNum(opcode & ~0xc0), UInt(read(ops, ULEB128)))
     elseif opcode == DWARF.DW_CFA_set_loc
@@ -255,7 +258,7 @@ function operands(ops, opcode, addrT)
     end
 end
 
-function evaluage_op(s :: RegStates, ops, cie :: CIE)
+function evaluage_op(s :: RegStates, ops, cie :: CIE; initial_rs = RegStates())
     op = read(ops, UInt8)
     # Section 6.4.2 of DWARF 4
     opops = operands(ops, op, UInt64)
@@ -293,9 +296,9 @@ function evaluage_op(s :: RegStates, ops, cie :: CIE)
     elseif op == DWARF.DW_CFA_expression ||
            op == DWARF.DW_CFA_val_expression
         error()
-    elseif op == DWARF.DW_CFA_restore ||
+    elseif (op & 0xc0) == DWARF.DW_CFA_restore ||
            op == DWARF.DW_CFA_restore_extended
-        error()
+        s[opops[1]] = initial_rs[opops[1]]
     elseif op == DWARF.DW_CFA_remember_state    # 6.4.2.4 Row state
         push!(s.stack, (copy(s.cfa), copy(s.values)))
     elseif op == DWARF.DW_CFA_restore_state
@@ -340,14 +343,17 @@ function _dump_program(out, bytes, eh_frame, endpos, cie, target=0, rs = RegStat
                 print(out, operand)
             end
         end
+        
+        seek(eh_frame, oppos)
+        evaluage_op(rs, eh_frame, cie)
+        if (op & 0xc0) == DWARF.DW_CFA_advance_loc || op == DWARF.DW_CFA_advance_loc1 ||
+                op == DWARF.DW_CFA_advance_loc2 || op == DWARF.DW_CFA_advance_loc4
+            print(out," (=> $(rs.delta))")
+        end
         println(out)
-        if target != 0
-            seek(eh_frame, oppos)
-            evaluage_op(rs, eh_frame, cie)
-            if rs.delta > target
-                print_with_color(:red, out, "--------------\n")
-                target = 0
-            end
+        if target != 0 && rs.delta > target
+            print_with_color(:red, out, "--------------\n")
+            target = 0
         end
     end
     (target != 0 && print_with_color(:red, out, "--------------\n"))
@@ -409,9 +415,9 @@ dump_program(out, cie::CIE; bytes = false, target = 0, rs = RegStates()) =
         length(cie.initial_code), cie, target, rs)
 
 function evaluate_program(code::Union{IO, SectionRef}, target,
-        cie, rs = RegStates(), maxpos = (-1 % UInt))
+        cie, rs = RegStates(), maxpos = (-1 % UInt); initial_rs = RegStates())
     while !eof(code) && position(code) < maxpos && rs.delta <= target
-        evaluage_op(rs, code, cie)
+        evaluage_op(rs, code, cie; initial_rs=initial_rs)
     end
     rs
 end
@@ -420,7 +426,7 @@ function evaluate_program(fde::FDERef, target; cie = nothing)
     _prepare_program(fde, cie) do eh_frame, endpos, cie, augment_length
         rs = RegStates()
         evaluate_program(IOBuffer(cie.initial_code), target, cie, rs)
-        evaluate_program(eh_frame, target, cie, rs, endpos)
+        evaluate_program(eh_frame, target, cie, rs, endpos; initial_rs = copy(rs))
         rs
     end
 end
