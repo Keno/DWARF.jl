@@ -129,18 +129,17 @@ module DWARF
 
 
     ### LEB 128 types
-    abstract LEB128
+    abstract LEB128{T}
 
     Base.convert{T<:LEB128}(::Type{T},x::Int64) = T(big(x))
-    Base.convert{T<:LEB128}(::Type{BigInt},x::T) = x.val
     Base.convert{T<:Integer, S<:LEB128}(::Type{T}, x::S) = convert(T,x.val)
 
-    immutable ULEB128 <: LEB128
-        val::BigInt
+    immutable ULEB128{T} <: LEB128{T}
+        val::T
     end
 
-    immutable SLEB128 <: LEB128
-        val::BigInt
+    immutable SLEB128{T} <: LEB128{T}
+        val::T
     end
 
     show(io::IO,s::SLEB128) = show(io,s.val)
@@ -154,12 +153,13 @@ module DWARF
     Base.zero{T<:LEB128}(::Type{T}) = convert(T,0)
     Base.hex(x::LEB128) = hex(x.val)
 
-    function read(io::IO, ::Type{ULEB128})
-        v = BigInt(0)
+    function read{T}(io::IO, ::Type{ULEB128{T}})
+        v = T(0)
         shift = 0
         while true
             c = read(io,UInt8)
-            v |= BigInt(c&0x7f)<<shift
+            ((8*sizeof(T))-2 < shift) && throw(InexactError())
+            v |= T(c&0x7f)<<shift
             if (c&0x80)==0 #is last bit
                 break
             end
@@ -167,7 +167,7 @@ module DWARF
         end
         ULEB128(v)
     end
-
+    read(io::IO, ::Type{ULEB128}) = read(io,ULEB128{UInt})
 
     function write(io::IO, x::ULEB128)
         x = x.val
@@ -182,61 +182,65 @@ module DWARF
         end
     end
 
-    function decode(data::Array{UInt8,1}, offset, ::Type{ULEB128}, typ = ULEB128)
-        v = BigInt(0)
+    function decode{T}(data::Array{UInt8,1}, offset, ::Type{ULEB128{T}})
+        v = T(0)
         shift = 0
         i=0
         while true
             c = data[offset+i]
             i+=1
-            v |= BigInt(c&0x7f)<<shift
+            ((8*sizeof(T))-2 < shift) && throw(InexactError())
+            v |= T(c&0x7f)<<shift
             if (c&0x80)==0 #is last bit
                 break
             end
             shift+=7
         end
-        (offset+i,typ(v))
+        (offset+i,T(v))
     end
 
-    function decode(data::Array{UInt8,1}, offset, ::Type{SLEB128}, typ = SLEB128)
-        v = BigInt(0)
+    function decode{T}(data::Array{UInt8,1}, offset, ::Type{SLEB128{T}})
+        v = T(0)
         shift = 0
         c=0
         i=0
         while true
             c = data[offset+i]
             i+=1
-            v |= BigInt(c&0x7f)<<shift
+            ((8*sizeof(T))-2 < shift) && throw(InexactError())
+            v |= T(c&0x7f)<<shift
             shift+=7
             if (c&0x80)==0 #is last bit
                 break
             end
         end
         if (c & 0x40) != 0
-            v |= -(BigInt(1)<<shift)
+            v |= -(T(1)<<shift)
         end
 
-        (offset+i,typ(v))
+        (offset+i,T(v))
     end
 
-    function read(io::IO, ::Type{SLEB128})
-        v = BigInt(0)
+    function read{T}(io::IO, ::Type{SLEB128{T}})
+        v = T(0)
         shift = 0
         c=0
         while(true)
             c = read(io,UInt8)
-            v |= BigInt(c&0x7f)<<shift
+            ((8*sizeof(T))-2 < shift) && throw(InexactError())
+            v |= T(c&0x7f)<<shift
             shift+=7
             if (c&0x80)==0 #is last bit
                 break
             end
         end
         if (c & 0x40) != 0
-            v |= -(BigInt(1)<<shift)
+            v |= -(T(1)<<shift)
         end
 
         SLEB128(v)
     end
+    read(io::IO, ::Type{SLEB128}) = read(io, SLEB128{Int})
 
     function write(io::IO, x::SLEB128)
         x = x.val
@@ -345,17 +349,17 @@ module DWARF
                 i+=8
             elseif opcode == DWARF.DW_OP_constu || opcode == DWARF.DW_OP_plus_uconst ||
                     opcode == DWARF.DW_OP_regx || opcode == DWARF.DW_OP_piece
-                (i,operand) = DWARF.decode(opcodes,i,ULEB128,addr_type)
+                (i,operand) = DWARF.decode(opcodes,i,ULEB128{addr_type})
             elseif opcode == DWARF.DW_OP_consts || opcode == DWARF.DW_OP_fbreg ||
                 opcode >= DWARF.DW_OP_breg0 && opcode <= DWARF.DW_OP_breg31
-                (i,operand) = DWARF.decode(opcodes,i,SLEB128,typeof(signed(addr_type(0))))
+                (i,operand) = DWARF.decode(opcodes,i,SLEB128{typeof(signed(addr_type(0)))})
             elseif opcode == DWARF.DW_OP_bregx
-                (i,reg) = DWARF.decode(opcodes,i,ULEB128)
-                (i,offset) = DWARF.decode(opcodes,i,SLEB128,addr_type)
+                (i,reg) = DWARF.decode(opcodes,i,ULEB128{UInt})
+                (i,offset) = DWARF.decode(opcodes,i,SLEB128{addr_type})
                 operand = (reg,offset)
             elseif opcode == DWARF.DW_OP_bit_piece
-                (i,reg) = DWARF.decode(opcodes,i,ULEB128)
-                (i,offset) = DWARF.decode(opcodes,i,ULEB128,addr_type)
+                (i,reg) = DWARF.decode(opcodes,i,ULEB128{UInt})
+                (i,offset) = DWARF.decode(opcodes,i,ULEB128{addr_type})
                 operand = (reg,offset)
             else
                 return (i,)
@@ -418,8 +422,8 @@ module DWARF
             elseif opcode == DWARF.DW_OP_not
                 push!(s.stack,~(pop!(s.stack)))
             elseif opcode == DWARF.DW_OP_plus_uconst
-                (i,val) = DWARF.decode(opcodes,i,ULEB128)
-                push!(s.stack,pop!(s.stack)+val.val)
+                (i,val) = DWARF.decode(opcodes,i,ULEB128{UInt})
+                push!(s.stack,pop!(s.stack)+UInt(val))
             elseif opcode == DWARF.DW_OP_shl
                 top = pop!(s.stack)
                 push!(s.stack,pop!(s.stack)<<top)
@@ -538,7 +542,7 @@ module DWARF
             if opcode >= DWARF.DW_OP_reg0 && opcode <= DWARF.DW_OP_reg31
                 return RegisterLocation(opcode-DWARF.DW_OP_reg0)
             elseif opcode == DWARF.DW_OP_regx
-                (i,val) = DWARF.decode(opcodes,i+1,ULEB128)
+                (i,val) = DWARF.decode(opcodes,i+1,ULEB128{UInt})
                 return RegisterLocation(val)
             else
                 evaluate_generic(s,opcodes,getreg_func,getword_func,addr_func,endianness)
@@ -571,9 +575,9 @@ module DWARF
 
         immutable FileEntry
             name::UTF8String
-            dir_idx::BigInt
-            timestamp::BigInt
-            filelength::BigInt
+            dir_idx::UInt
+            timestamp::UInt
+            filelength::UInt
         end
 
         Base.isequal(x::FileEntry,y::FileEntry) =
@@ -585,7 +589,7 @@ module DWARF
             if endof(s) == 0
                 return FileEntry(s,0,0,0)
             end
-            return FileEntry(s,read(io,ULEB128),read(io,ULEB128),read(io,ULEB128))
+            return FileEntry(s,read(io,ULEB128{UInt}),read(io,ULEB128{UInt}),read(io,ULEB128{UInt}))
         end
 
         function unpack(io,::Type{HeaderStub})
@@ -643,23 +647,23 @@ module DWARF
         header_type{T}(h::HeaderStub{T}) = T
 
         immutable RegisterState
-            address::BigInt
-            op_index::BigInt
-            file::BigInt
-            line::BigInt
-            column::BigInt
+            address::Int
+            op_index::Int
+            file::Int
+            line::Int
+            column::UInt
             is_stmt::Bool
             basic_block::Bool
             end_sequence::Bool
             prologue_end::Bool
             epilogue_begin::Bool
-            isa::BigInt
-            discriminator::BigInt
+            isa::Int
+            discriminator::Int
 
             # Initial Register state as defined by DWARF standard
             function RegisterState(default_is_stmt::Bool)
-                new(BigInt(0),BigInt(0),BigInt(1),BigInt(1),BigInt(0),default_is_stmt,
-                    false,false,false,false,BigInt(0),BigInt(0))
+                new(Int(0),Int(0),Int(1),Int(1),Int(0),default_is_stmt,
+                    false,false,false,false,Int(0),Int(0))
             end
 
             function RegisterState(x::RegisterState;
@@ -722,7 +726,7 @@ module DWARF
             if op == 0
                 # Extended opcode
                 pos = position(io)
-                size::BigInt = read(io,ULEB128)
+                size::UInt = read(io,ULEB128{UInt})
                 ex_op = read(io,UInt8)
                 if ex_op == DWARF.DW_LNE_end_sequence
                     position(io) > pos+size+1 && error("Malformed extended instruction")
@@ -801,9 +805,9 @@ module DWARF
                     epilogue_begin = false)
                 return ret
             elseif opcode == DWARF.DW_LNS_advance_pc
-                pc_adv!(m,operands[1].val)
+                pc_adv!(m,UInt(operands[1]))
             elseif opcode == DWARF.DW_LNS_advance_line
-                m.state = RegisterState(m.state,line = m.state.line + operands[1].val)
+                m.state = RegisterState(m.state,line = m.state.line + Int(operands[1]))
             elseif opcode == DWARF.DW_LNS_set_file
                 m.state = RegisterState(m.state,file = operands[1])
             elseif opcode == DWARF.DW_LNS_set_column
@@ -869,7 +873,7 @@ module DWARF
                     if opcode == DWARF.DW_LNE_set_address+DW_LNS_OFF
                         print(out, "0x", hex(operand))
                     elseif isa(operand, ULEB128) || isa(operand, SLEB128)
-                        print(out, operand.val)
+                        print(out, typeof(operand).parameters[1](operand))
                     else
                         print(out, operand)
                     end
@@ -918,7 +922,7 @@ module DWARF
     import .LineTableSupport.LineTable
     export LineTable
 
-    zero(::Type{AttributeSpecification}) = AttributeSpecification(ULEB128(BigInt(0)),ULEB128(BigInt(0)))
+    zero(::Type{AttributeSpecification}) = AttributeSpecification(0,0)
 
     const tag_color = :blue
 
@@ -1123,4 +1127,5 @@ module DWARF
 
     include("navigate.jl")
     include("cfi.jl")
+    include("precompile.jl")
 end #module
