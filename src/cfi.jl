@@ -218,10 +218,13 @@ function operands(ops, opcode, addrT)
         return (read(ops, UInt16),)
     elseif opcode == DWARF.DW_CFA_advance_loc4
         return (read(ops, UInt32),)
-    elseif opcode == DWARF.DW_CFA_offset_extended || opcode == DWARF.DW_CFA_def_cfa ||
-            opcode == DWARF.DW_CFA_offset_extended_sf || opcode == DWARF.DW_CFA_def_cfa_sf
+    elseif opcode == DWARF.DW_CFA_offset_extended || opcode == DWARF.DW_CFA_def_cfa
         reg = RegNum(read(ops, ULEB128))
         offset = UInt(read(ops, ULEB128))
+        return (reg, offset)
+    elseif opcode == DWARF.DW_CFA_offset_extended_sf || opcode == DWARF.DW_CFA_def_cfa_sf
+        reg = RegNum(read(ops, ULEB128))
+        offset = Int(read(ops, SLEB128))
         return (reg, offset)
     elseif opcode == DWARF.DW_CFA_register
         reg1 = RegNum(read(ops, ULEB128))
@@ -288,7 +291,7 @@ function evaluage_op(s :: RegStates, ops, cie :: CIE; initial_rs = RegStates())
     elseif op == DWARF.DW_CFA_offset_extended || op == DWARF.DW_CFA_offset_extended_sf
     # Note, we assume here that DW_CFA_offset_extended uses a factored offset
     # even though the DWARF specification does not clearly state this.
-        s[opops[1]] = Offset(opops[2]*cie.data_align, false)
+        s[opops[1]] = Offset(Int(opops[2])*cie.data_align, false)
     elseif op == DWARF.DW_CFA_val_offset || op == op == DWARF.DW_CFA_val_offset_sf
         s[opops[1]] = Offset(opops[2]*cie.data_align, true)
     elseif op == DWARF.DW_CFA_register
