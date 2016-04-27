@@ -303,7 +303,7 @@ function evaluage_op(s :: RegStates, ops, cie :: CIE; initial_rs = RegStates())
            op == DWARF.DW_CFA_restore_extended
         s[opops[1]] = initial_rs[opops[1]]
     elseif op == DWARF.DW_CFA_remember_state    # 6.4.2.4 Row state
-        push!(s.stack, (copy(s.cfa), copy(s.values)))
+        push!(s.stack, (s.cfa, copy(s.values)))
     elseif op == DWARF.DW_CFA_restore_state
         s.cfa, s.values = pop!(s.stack)
     elseif op == DWARF.DW_CFA_nop                 # 6.4.2.5 Padding
