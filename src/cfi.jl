@@ -175,59 +175,95 @@ end
 
 # eh_frame parsing
 immutable RegNum
-    num::UInt64
+    num::Int
 end
+const RegCFA = RegNum(-1)
 function Base.print(io::IO, r::RegNum)
-    print(io, "%", (isa(io,IOContext) && haskey(io,:reg_map)) ?
-        get(io,:reg_map,:unknown)[r.num] : r.num)
+    if r == RegCFA
+        print(io, "%cfa")
+    else
+        print(io, "%", (isa(io,IOContext) && haskey(io,:reg_map)) ?
+              get(io,:reg_map,:unknown)[r.num] : r.num)
+    end
 end
 Base.convert(::Type{Int}, r::RegNum) = Int(r.num)
 
-immutable Undef
-end
-immutable Same
-end
-immutable Offset
-    n :: Int
-    is_val :: Bool
-end
 immutable Expr
     opcodes :: Vector{UInt8}
     is_val :: Bool
 end
-immutable Reg
-    n :: Int
+const ExprNone = Expr(Array(UInt8, 0), false)
+module Flag
+const Undef = 0
+const Same = 1
+const Val = 2
+const Deref = 3
+# if the RegState is DwarfExpr the actual expression is elsewhere in the RegStates container
+const DwarfExpr = 4
 end
-typealias RegState Union{Undef,Same,Offset,Expr,Reg}
-typealias RegOff Tuple{RegNum,Int}
-typealias CFAState Union{RegOff,Expr,Undef}
+immutable RegState
+    base :: RegNum
+    offset :: Int
+    flag :: UInt8
+end
+const ExprRegState = RegState(RegNum(-2),0,Flag.DwarfExpr)
+Offset(r::RegNum, n::Int) = RegState(r, n, Flag.Val)
+Load(r::RegNum, n::Int) = RegState(r, n, Flag.Deref)
+Undef() = RegState(RegNum(-2),0, Flag.Undef)
+Same() = RegState(RegNum(-2),0, Flag.Same)
+Reg(n::Int) = RegState(RegNum(n),0,Flag.Val)
+
+function Base.show(io::IO, r::RegState)
+    if r.flag == Flag.Undef
+        print(io, "undef")
+    elseif r.flag == Flag.Same
+        print(io, "same")
+    elseif r.flag == Flag.DwarfExpr
+        print(io, "expr")
+    elseif r.flag == Flag.Val
+        @printf(io, "%s + %#x", r.base, r.offset)
+    elseif r.flag == Flag.Deref
+        @printf(io, "*(%s + %#x)", r.base, r.offset)
+    else
+        error()
+    end
+end
+isundef(r::RegState) = r.flag == Flag.Undef
+issame(r::RegState) = r.flag == Flag.Same
+isdwarfexpr(r::RegState) = r.flag == Flag.DwarfExpr
 type RegStates
     values :: Dict{Int,RegState}
-    stack :: Vector{Tuple{Nullable{RegOff}, CFAState, Dict{Int,RegState}}}
-    # Split out from the union below for performance
-    cfa_off :: Nullable{RegOff}
-    cfa :: CFAState # either a DWARF expr or Undef
+    values_expr :: Dict{Int,Expr}
+    stack :: Vector{Tuple{Dict{Int,RegState},Dict{Int,Expr},RegState,Expr}}
+    cfa :: RegState
+    cfa_expr :: Expr
     delta :: Int
 end
-RegStates() = RegStates(Dict{Int,RegState}(), Vector{Dict{Int,RegState}}(), Nullable{RegOff}(), Undef(), 0)
-Base.copy(s::RegStates) = RegStates(copy(s.values),copy(s.stack),s.cfa_off,s.cfa,s.delta)
+RegStates() = RegStates(Dict{Int,RegState}(), Dict{Int,Expr}(), Array(Tuple{Dict{Int,RegState},Dict{Int,Expr},RegState,Expr}, 0), Undef(), ExprNone, 0)
+Base.copy(s::RegStates) = RegStates(copy(s.values),copy(s.values_expr),copy(s.stack),s.cfa,s.cfa_expr,s.delta)
 
 Base.getindex(s :: RegStates, n) = get(s.values, n, Undef())
-Base.setindex!(s :: RegStates, val::RegState, n :: Union{Int, RegNum}) =
-    isa(val,Undef) ? delete!(s.values, Int(n)) : s.values[Int(n)] = val
+function Base.setindex!(s :: RegStates, val::RegState, n :: Union{Int, RegNum})
+    @assert(!isdwarfexpr(val))
+    if isundef(val)
+        delete!(s.values, Int(n))
+    else
+        s.values[Int(n)] = val
+    end
+    nothing
+end
+function Base.setindex!(s :: RegState, val :: Expr, n :: Union{Int, RegNum})
+    s.values[Int(n)] = ExprRegState
+    s.values_expr[Int(n)] = val
+end
 function Base.show(io::IO, s :: RegStates)
     print(io, "RegStates [", s.delta, "] cfa: ")
-    if !isnull(s.cfa_off)
-        cfa = get(s.cfa_off)
-        @printf(io, "r%d + %#x", cfa[1], cfa[2])
-    else
-        println(io, s.cfa)
-    end
+    println(io, s.cfa)
     for (k,v) in s.values
-        println(io, "\tr", k, " = ", v)
+        println(io, "\t", RegNum(k), " = ", v)
     end
 end
-Base.show(io::IO, o::Offset) = @printf(io, "%s(cfa+ %#x)", o.is_val ? "" : "*", o.n)
+
 immutable CIE
     code_align :: Int
     data_align :: Int
@@ -375,32 +411,32 @@ function evaluage_op(s :: RegStates, opio, cie :: CIE, initial_rs = RegStates())
             op == DWARF.DW_CFA_advance_loc2 || op == DWARF.DW_CFA_advance_loc4
         s.delta += opops[1] * cie.code_align
     elseif op == DWARF.DW_CFA_def_cfa             # 6.4.2.2 CFA definitions
-        s.cfa_off = (opops[1], Int(opops[2]))
+        s.cfa = Offset(opops[1], Int(opops[2]))
     elseif op == DWARF.DW_CFA_def_cfa_sf
-        s.cfa_off = (opops[1], Int(opops[2]*cie.data_align))
+        s.cfa = Offset(opops[1], Int(opops[2]*cie.data_align))
     elseif op == DWARF.DW_CFA_def_cfa_register
-        s.cfa_off = (opops[1], get(s.cfa_off)[2])
+        s.cfa = Offset(opops[1], s.cfa.offset)
     elseif op == DWARF.DW_CFA_def_cfa_offset
-        s.cfa_off = (get(s.cfa_off)[1], Int(opops[1]))
+        s.cfa = Offset(s.cfa.base, Int(opops[1]))
     elseif op == DWARF.DW_CFA_def_cfa_offset_sf
-        s.cfa_off = (get(s.cfa_off)[1], Int(opops[1]*cie.data_align))
+        s.cfa = Offset(s.cfa.base, Int(opops[1]*cie.data_align))
     elseif op == DWARF.DW_CFA_def_cfa_expression
-        s.cfa_off = Nullable{RefOff}()
-        s.cfa = Expr(opops[1], false)
+        s.cfa = ExprRegState
+        s.cfa_expr = Expr(opops[1], false)
     elseif op == DWARF.DW_CFA_undefined           # 6.4.2.3 Register rules
         s[opops[1]] = Undef()
     elseif op == DWARF.DW_CFA_same_value
         s[opops[1]] = Same()
     elseif op == DWARF.DW_CFA_offset
-        s[opops[1]] = Offset(Int(opops[2])*cie.data_align, false)
+        s[opops[1]] = Load(RegCFA, Int(opops[2])*cie.data_align)
     elseif op == DWARF.DW_CFA_offset_extended || op == DWARF.DW_CFA_offset_extended_sf
     # Note, we assume here that DW_CFA_offset_extended uses a factored offset
     # even though the DWARF specification does not clearly state this.
-        s[opops[1]] = Offset(Int(opops[2])*cie.data_align, false)
+        s[opops[1]] = Load(RegCFA, Int(opops[2])*cie.data_align)
     elseif op == DWARF.DW_CFA_val_offset || op == DWARF.DW_CFA_val_offset_sf
-        s[opops[1]] = Offset(opops[2]*cie.data_align, true)
+        s[opops[1]] = Offset(RegCFA, opops[2]*cie.data_align)
     elseif op == DWARF.DW_CFA_register
-        s[opops[1]] = Reg(opops[2]);
+        s[opops[1]] = Reg(opops[2])
     elseif op == DWARF.DW_CFA_expression ||
            op == DWARF.DW_CFA_val_expression
         error()
@@ -408,9 +444,9 @@ function evaluage_op(s :: RegStates, opio, cie :: CIE, initial_rs = RegStates())
            op == DWARF.DW_CFA_restore_extended
         s[opops[1]] = initial_rs[opops[1]]
     elseif op == DWARF.DW_CFA_remember_state    # 6.4.2.4 Row state
-        push!(s.stack, (s.cfa_off, s.cfa, copy(s.values)))
+        push!(s.stack, (copy(s.values), copy(s.values_expr), s.cfa, s.cfa_expr))
     elseif op == DWARF.DW_CFA_restore_state
-        s.cfa_off, s.cfa, s.values = pop!(s.stack)
+        s.values, s.values_expr, s.cfa, s.cfa_expr = pop!(s.stack)
     elseif op == DWARF.DW_CFA_nop                 # 6.4.2.5 Padding
     else
         error("unknown CFA opcode $op")
@@ -574,7 +610,7 @@ function evaluate_program(fde::FDERef, target; cie = nothing, ciecache = nothing
         end
         evaluate_program(eh_frame, target, cie, rs, endpos; initial_rs = copy(rs))
         rs
-    end
+    end::RegStates
 end
 
 function forward_to_fde_or_cie(eh_frame, offset, skipfirst = true, tofde = true)
