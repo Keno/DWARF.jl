@@ -15,7 +15,7 @@ function read_cstring(io)
     a
 end
 
-export realize_cie, initial_loc, FDEIterator, fde_range
+export realize_cie, initial_loc, FDEIterator, fde_range, realize_cieoff
 
 # Reference type
 
@@ -203,20 +203,23 @@ typealias RegOff Tuple{RegNum,Int}
 typealias CFAState Union{RegOff,Expr,Undef}
 type RegStates
     values :: Dict{Int,RegState}
-    stack :: Vector{Tuple{CFAState, Dict{Int,RegState}}}
-    cfa :: CFAState # either (reg,offset) or a DWARF expr
+    stack :: Vector{Tuple{Nullable{RegOff}, CFAState, Dict{Int,RegState}}}
+    # Split out from the union below for performance
+    cfa_off :: Nullable{RegOff}
+    cfa :: CFAState # either a DWARF expr or Undef
     delta :: Int
 end
-RegStates() = RegStates(Dict{Int,RegState}(), Vector{Dict{Int,RegState}}(), Undef(), 0)
-Base.copy(s::RegStates) = RegStates(copy(s.values),copy(s.stack),s.cfa,s.delta)
+RegStates() = RegStates(Dict{Int,RegState}(), Vector{Dict{Int,RegState}}(), Nullable{RegOff}(), Undef(), 0)
+Base.copy(s::RegStates) = RegStates(copy(s.values),copy(s.stack),s.cfa_off,s.cfa,s.delta)
 
 Base.getindex(s :: RegStates, n) = get(s.values, n, Undef())
 Base.setindex!(s :: RegStates, val::RegState, n :: Union{Int, RegNum}) =
     isa(val,Undef) ? delete!(s.values, Int(n)) : s.values[Int(n)] = val
 function Base.show(io::IO, s :: RegStates)
     print(io, "RegStates [", s.delta, "] cfa: ")
-    if isa(s.cfa, Tuple{Int,Int})
-        @printf(io, "r%d + %#x", s.cfa[1], s.cfa[2])
+    if !isnull(s.cfa_off)
+        cfa = get(s.cfa_off)
+        @printf(io, "r%d + %#x", cfa[1], cfa[2])
     else
         println(io, s.cfa)
     end
@@ -372,16 +375,17 @@ function evaluage_op(s :: RegStates, opio, cie :: CIE, initial_rs = RegStates())
             op == DWARF.DW_CFA_advance_loc2 || op == DWARF.DW_CFA_advance_loc4
         s.delta += opops[1] * cie.code_align
     elseif op == DWARF.DW_CFA_def_cfa             # 6.4.2.2 CFA definitions
-        s.cfa = (opops[1], Int(opops[2]))
+        s.cfa_off = (opops[1], Int(opops[2]))
     elseif op == DWARF.DW_CFA_def_cfa_sf
-        s.cfa = (opops[1], Int(opops[2]*cie.data_align))
+        s.cfa_off = (opops[1], Int(opops[2]*cie.data_align))
     elseif op == DWARF.DW_CFA_def_cfa_register
-        s.cfa = (opops[1], s.cfa[2])
+        s.cfa_off = (opops[1], get(s.cfa_off)[2])
     elseif op == DWARF.DW_CFA_def_cfa_offset
-        s.cfa = ((s.cfa::RegOff)[1], Int(opops[1]))
+        s.cfa_off = (get(s.cfa_off)[1], Int(opops[1]))
     elseif op == DWARF.DW_CFA_def_cfa_offset_sf
-        s.cfa = ((s.cfa::RegOff)[1], Int(opops[1]*cie.data_align))
+        s.cfa_off = (get(s.cfa_off)[1], Int(opops[1]*cie.data_align))
     elseif op == DWARF.DW_CFA_def_cfa_expression
+        s.cfa_off = Nullable{RefOff}()
         s.cfa = Expr(opops[1], false)
     elseif op == DWARF.DW_CFA_undefined           # 6.4.2.3 Register rules
         s[opops[1]] = Undef()
@@ -404,9 +408,9 @@ function evaluage_op(s :: RegStates, opio, cie :: CIE, initial_rs = RegStates())
            op == DWARF.DW_CFA_restore_extended
         s[opops[1]] = initial_rs[opops[1]]
     elseif op == DWARF.DW_CFA_remember_state    # 6.4.2.4 Row state
-        push!(s.stack, (s.cfa, copy(s.values)))
+        push!(s.stack, (s.cfa_off, s.cfa, copy(s.values)))
     elseif op == DWARF.DW_CFA_restore_state
-        s.cfa, s.values = pop!(s.stack)
+        s.cfa_off, s.cfa, s.values = pop!(s.stack)
     elseif op == DWARF.DW_CFA_nop                 # 6.4.2.5 Padding
     else
         error("unknown CFA opcode $op")
@@ -417,7 +421,7 @@ end
 function read_lenid(io)
     len::UInt64 = read(io, UInt32)
     ls = sizeof(UInt32)
-    len > 0 || return error()
+    len > 0 || return ls, 0, 0, 0
     if len == 0xffffffff
         len = read(io, UInt64)
         ls = sizeof(UInt64)
@@ -466,7 +470,7 @@ function _dump_program(out, bytes, eh_frame, endpos, cie, target=0, rs = RegStat
     (target != 0 && print_with_color(:red, out, "--------------\n"))
 end
 
-function _prepare_program{R}(f, fde::FDERef{R}, cie = nothing)
+function _prepare_program{R}(f, fde::FDERef{R}, cie = nothing, ciecache = nothing, ccoff=0)
     eh_frame = fde.eh_frame
     seek(eh_frame, fde.offset)
     length = read(eh_frame, UInt32)
@@ -475,36 +479,45 @@ function _prepare_program{R}(f, fde::FDERef{R}, cie = nothing)
     # Split to create optimization boundary
     # Manual union splitting
     if typeof(length) == UInt32
-        __prepare_program(f, fde, cie, length::UInt32, startpos)
+        __prepare_program(f, fde, cie, ciecache, length::UInt32, startpos, ccoff)
     else
-        __prepare_program(f, fde, cie, length::UInt64, startpos)
+        __prepare_program(f, fde, cie, ciecache, length::UInt64, startpos, ccoff)
     end
 end
-function __prepare_program{T,R}(f, fde::FDERef{R}, cie::Void, length::T, startpos)
+function __prepare_program{T,R}(f, fde::FDERef{R}, cie::Void, ciecache, length::T, startpos, ccoff)
     eh_frame = fde.eh_frame
     # Obtain CIERef
     CIE_pointer::UInt64 = read(eh_frame, typeof(length))
-    cie = CIERef(eh_frame, fde.is_eh_not_debug ?
-        startpos - CIE_pointer : CIE_pointer)
-    __prepare_program(f, fde, realize(cie), length, startpos)
+    cieoff = fde.is_eh_not_debug ? startpos - CIE_pointer : CIE_pointer
+    if ciecache == nothing
+        __prepare_program(f, fde, realize(CIERef(eh_frame, cieoff)), ciecache, length, startpos, 0)
+    else
+        ccoff = findfirst(ciecache.offsets, cieoff)
+        __prepare_program(f, fde, ciecache.cies[ccoff], ciecache, length, startpos, ccoff)
+    end
 end
-function __prepare_program{T,R}(f, fde::FDERef{R}, cie::CIE, length::T, startpos)
+function __prepare_program{T,R}(f, fde::FDERef{R}, cie::CIE, ciecache, length::T, startpos, ccoff)
     eh_frame = fde.eh_frame
     seek(eh_frame, startpos + sizeof(length) + 2sizeof_encoding_type(cie.addr_format))
     augment_length = UInt(read(eh_frame, ULEB128))
     seek(eh_frame, position(eh_frame) + augment_length)
-    f(eh_frame, startpos + length, cie, augment_length)
+    f(eh_frame, startpos + length, cie, augment_length, ccoff)
 end
 
-function realize_cie(fde)
-    f = (a,b,cie,augment_length)->cie
-    _prepare_program(f, fde, nothing)
+function realize_cie(fde, ciecache = nothing)
+    f = (a,b,cie,augment_length,__)->cie
+    _prepare_program(f, fde, nothing, ciecache)
+end
+
+function realize_cieoff(fde, ciecache = nothing)
+    f = (a,b,cie,augment_length,ccoff)->(cie,ccoff)
+    _prepare_program(f, fde, nothing, ciecache)
 end
 
 """
 Returns the inital ip as a module-relative offset.
 """
-initial_loc(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, augment_length
+initial_loc(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, augment_length, __
     pos = position(eh_frame)-2sizeof_encoding_type(cie.addr_format)-augment_length-1
     seek(eh_frame, pos)
     pos = position(handle(eh_frame))
@@ -518,7 +531,7 @@ end
 """
 Returns the final ip as a module-relative offset.
 """
-fde_range(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, augment_length
+fde_range(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, augment_length, __
     pos = position(eh_frame)-2sizeof_encoding_type(cie.addr_format)-augment_length-1
     seek(eh_frame, pos)
     read_encoded(eh_frame, cie.addr_format)
@@ -530,7 +543,7 @@ fde_range(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, 
 end
 
 dump_program(out::IO, fde::FDERef; cie = nothing, bytes = false, target = 0, rs = RegStates()) =
-    _prepare_program((a,b,c,_)->_dump_program(out, bytes, a,b,c, target, rs), fde, cie)
+    _prepare_program((a,b,c,_,__)->_dump_program(out, bytes, a,b,c, target, rs), fde, cie)
 
 dump_program(out, cie::CIE; bytes = false, target = 0, rs = RegStates()) =
     _dump_program(out,  bytes, IOBuffer(cie.initial_code),
@@ -551,13 +564,31 @@ function evaluate_program(sec::SectionRef, target,
 end
 
 const _dummy_rs = RegStates() # microoptimization
-function evaluate_program(fde::FDERef, target; cie = nothing)
-    _prepare_program(fde, cie) do eh_frame, endpos, cie, augment_length
-        rs = RegStates()
-        evaluate_program(IOBuffer(cie.initial_code), target, cie, rs; initial_rs = _dummy_rs)
+function evaluate_program(fde::FDERef, target; cie = nothing, ciecache = nothing, ccoff = 0)
+    _prepare_program(fde, cie, ciecache, ccoff) do eh_frame, endpos, cie, augment_length, ccoff
+        if ccoff != 0
+            rs = copy(ciecache.initial_rss[ccoff])
+        else
+            rs = RegStates()
+            evaluate_program(IOBuffer(cie.initial_code), target, cie, rs; initial_rs = _dummy_rs)
+        end
         evaluate_program(eh_frame, target, cie, rs, endpos; initial_rs = copy(rs))
         rs
     end
+end
+
+function forward_to_fde_or_cie(eh_frame, offset, skipfirst = true, tofde = true)
+    while true
+        seek(eh_frame, offset)
+        eof(eh_frame) && break
+        ls, len, begpos, id = read_lenid(eh_frame)
+        len == 0 && return sectionsize(eh_frame)
+        # Check if we found an fde
+        !skipfirst && (tofde $ (id == 0)) && return offset
+        skipfirst = false
+        offset = begpos + len
+    end
+    return offset
 end
 
 immutable FDEIterator
@@ -565,23 +596,19 @@ immutable FDEIterator
 end
 Base.iteratorsize(::Type{FDEIterator}) = Base.SizeUnknown()
 Base.done(x::FDEIterator, offset) = offset >= sectionsize(x.eh_frame)
-
-function forward_to_fde(eh_frame, offset, skipfirst = true)
-    while true
-        seek(eh_frame, offset)
-        eof(eh_frame) && break
-        ls, len, begpos, id = read_lenid(eh_frame)
-        # Check if we found an fde
-        !skipfirst && (id != 0) && return offset
-        skipfirst = false
-        offset = begpos + len
-    end
-    return offset
+Base.start(x::FDEIterator) = forward_to_fde_or_cie(x.eh_frame, 0, false, true)
+function Base.next(x::FDEIterator, offset)
+    return (FDERef(x.eh_frame, offset, true), forward_to_fde_or_cie(x.eh_frame, offset))
 end
 
-Base.start(x::FDEIterator) = forward_to_fde(x.eh_frame, 0, false)
-function Base.next(x::FDEIterator, offset)
-    return (FDERef(x.eh_frame, offset, true), forward_to_fde(x.eh_frame, offset))
+immutable CIEIterator
+    eh_frame::SectionRef    
+end
+Base.iteratorsize(::Type{CIEIterator}) = Base.SizeUnknown()
+Base.done(x::CIEIterator, offset) = offset >= sectionsize(x.eh_frame)
+Base.start(x::CIEIterator) = forward_to_fde_or_cie(x.eh_frame, 0, false, false)
+function Base.next(x::CIEIterator, offset)
+    return (CIERef(x.eh_frame, UInt(offset)), forward_to_fde_or_cie(x.eh_frame, offset, true, false))
 end
 
 function read_cie(io, len, ls)
@@ -626,6 +653,27 @@ end
 function Base.read(io::IO, ::Type{CIE})
     ls, len, begpos, id = read_lenid(io)
     read_cie(io, len, ls)
+end
+
+# Precomputing CIE to pull it out of the hot path
+immutable CIECache
+    offsets::Vector{UInt}
+    cies::Vector{CIE}
+    initial_rss::Vector{RegStates}
+end
+CIECache() = CIECache(Vector{UInt}(), Vector{CIE}(), Vector{RegStates}())
+
+function precompute(eh_frame_sec)
+    cache = CIECache()
+    for cieref in CIEIterator(eh_frame_sec)
+        push!(cache.offsets, cieref.offset)
+        push!(cache.cies, realize(cieref))
+        rs = RegStates()
+        cie = cache.cies[end]
+        evaluate_program(IOBuffer(cie.initial_code), 0, cie, rs; initial_rs = _dummy_rs)
+        push!(cache.initial_rss, rs)
+    end
+    cache
 end
 
 end
