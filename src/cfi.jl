@@ -6,6 +6,7 @@ import DWARF.tag, DWARF.children, DWARF.attributes
 using ObjFileBase
 using ObjFileBase: DebugSections, ObjectHandle, handle
 import Base.read
+using Base: @pure
 function read_cstring(io)
     a = Array(UInt8, 0)
     while (x = read(io, UInt8)) != 0
@@ -18,15 +19,15 @@ export realize_cie, initial_loc, FDEIterator, fde_range
 
 # Reference type
 
-immutable FDERef
-    eh_frame::SectionRef
+immutable FDERef{SR<:SectionRef}
+    eh_frame::SR
     offset::UInt
     # Distinguish between FDEs in eh_frame (true) or debug_frame
     is_eh_not_debug::Bool
 end
 
-immutable CIERef
-    eh_frame::SectionRef
+immutable CIERef{SR<:SectionRef}
+    eh_frame::SR
     offset::UInt
 end
 
@@ -36,7 +37,7 @@ immutable DataRel; ptr; end
 immutable PcRel; ptr; end
 immutable Indirect; ptr; end
 
-function encoding_type(encoding)
+@pure function encoding_type(encoding)
     data_enc = (encoding & 0xf)
     if data_enc == DWARF.DW_EH_PE_uleb128
         return ULEB128
@@ -59,10 +60,12 @@ function encoding_type(encoding)
     elseif data_enc == DWARF.DW_EH_PE_sdata8
         return Int64
     else
-        @show data_enc
-        error("Unknown encoding type")
+        error("Unknown encoding type ($data_enc)")
     end
 end
+const sizeof_map = UInt8[try; sizeof(encoding_type(i)); catch; 0; end for i=0:0xc]
+sizeof_encoding_type(enc) = sizeof_map[(enc&0xf)+1]
+
 
 
 function read_encoded(io, encoding)
@@ -86,7 +89,7 @@ immutable eh_frame_hdr
     table_enc::UInt8
 end
 
-function read(io::SectionRef, ::Type{eh_frame_hdr})
+function read{T<:ObjFileBase.ObjectHandle}(io::SectionRef{T}, ::Type{eh_frame_hdr})
     seekstart(io)
     version = read(io, UInt8)
     @assert version == 1
@@ -98,18 +101,17 @@ function read(io::SectionRef, ::Type{eh_frame_hdr})
     eh_frame_hdr(eh_frame_ptr, fde_count, position(io), table_enc)
 end
 
-immutable EhFrameRef <: Base.AbstractArray{Tuple,1}
+immutable EhFrameRef{SR <: SectionRef} <: Base.AbstractArray{Tuple,1}
     header::eh_frame_hdr
-    hdr_sec::SectionRef
-    frame_sec::SectionRef
+    hdr_sec::SR
+    frame_sec::SR
 end
 EhFrameRef(hdr_sec::SectionRef, frame_sec::SectionRef) =
     EhFrameRef(read(hdr_sec, eh_frame_hdr), hdr_sec, frame_sec)
 Base.length(ehfr::EhFrameRef) = Int(ehfr.header.fde_count)
 Base.size(ehfr::EhFrameRef) = (length(ehfr),)
 
-function compute_entry_type(ehfr)
-    enc = ehfr.header.table_enc
+@pure function compute_entry_type(enc::Integer)
     # First check that the encoding is indeed datarel
     @assert (enc & 0xf0) == DWARF.DW_EH_PE_datarel
     entry_field_T = encoding_type(enc)
@@ -117,24 +119,58 @@ function compute_entry_type(ehfr)
     @assert !isa(entry_field_T, DWARF.LEB128)
     entry_field_T
 end
+compute_entry_type(ehfr::EhFrameRef) = compute_entry_type(hfr.header.table_enc)
 
 seekentry(ehfr, idx, entry_size=2sizeof(compute_entry_type(ehfr))) =
     seek(ehfr.hdr_sec, ehfr.header.table_offset + (idx-1)*entry_size)
-function Base.getindex(ehdr::EhFrameRef, idx, entry_type=compute_entry_type(ehdr))
+function Base.getindex{T}(ehdr::EhFrameRef, idx, entry_type::Type{T})
     seekentry(ehdr, idx, 2sizeof(entry_type))
-    ip = read(ehdr.hdr_sec, entry_type)
-    offset = read(ehdr.hdr_sec, entry_type)
-    (ip, offset)
+    ip = read(ehdr.hdr_sec, entry_type)::entry_type
+    offset = read(ehdr.hdr_sec, entry_type)::entry_type
+    (Int(ip), Int(offset))
 end
+function Base.getindex(ehfr::EhFrameRef, idx)
+    # Fast-path the standard case
+    enc = ehfr.header.table_enc
+    if enc == 0x3b
+        Base.getindex(ehfr, idx, compute_entry_type(0x3b))
+    else
+        Base.getindex(ehfr, idx, compute_entry_type(enc))::Tuple{Int,Int}
+    end
+end
+
+# This is a huge performance hotspot. Hand optimize it.
+function searchsortedlast_fde{T}(ehfr::EhFrameRef, offset, entry_type::Type{T})
+    lo = 0
+    hi = length(ehfr)
+    @inbounds while lo < hi-1
+        m = (lo+hi)>>>1
+        seekentry(ehfr, m, 2sizeof(entry_type))
+        if offset < read(ehfr.hdr_sec, entry_type)::entry_type
+            hi = m
+        else
+            lo = m
+        end
+    end
+    return lo
+end
+function searchsortedlast_fde(ehfr::EhFrameRef, offset)
+    # Fast-path the standard case
+    enc = ehfr.header.table_enc
+    enc == 0x3b ? searchsortedlast_fde(ehfr, offset, compute_entry_type(0x3b)) :
+        searchsortedlast_fde(ehfr, offset, compute_entry_type(enc))
+end
+searchsortedlast_fde(tab, offset) = searchsortedlast(tab, (offset, 0),by = x->x[1])
 
 """
 Searches for an FDE covering an ip, represented as an offset from the start
 of the eh_frame_hdr section
 """
 function search_fde_offset(frame_sec, tab, offset, offs_slide = 0)
-    found_idx = searchsortedlast(tab, (offset, 0),by = x->x[1])
+    found_idx = searchsortedlast_fde(tab, offset)
     (found_idx == 0) && error("Not found")
-    (tab[found_idx][1], FDERef(frame_sec, offs_slide + tab[found_idx][2], true))
+    res = tab[found_idx]
+    (res[1], FDERef(frame_sec, offs_slide + res[2], true))
 end
 
 # eh_frame parsing
@@ -163,7 +199,8 @@ immutable Reg
     n :: Int
 end
 typealias RegState Union{Undef,Same,Offset,Expr,Reg}
-typealias CFAState Union{Tuple{RegNum,Int},Expr,Undef}
+typealias RegOff Tuple{RegNum,Int}
+typealias CFAState Union{RegOff,Expr,Undef}
 type RegStates
     values :: Dict{Int,RegState}
     stack :: Vector{Tuple{CFAState, Dict{Int,RegState}}}
@@ -176,7 +213,6 @@ Base.copy(s::RegStates) = RegStates(copy(s.values),copy(s.stack),s.cfa,s.delta)
 Base.getindex(s :: RegStates, n) = get(s.values, n, Undef())
 Base.setindex!(s :: RegStates, val::RegState, n :: Union{Int, RegNum}) =
     isa(val,Undef) ? delete!(s.values, Int(n)) : s.values[Int(n)] = val
-Base.convert(::Type{Int}, x::Union{SLEB128,ULEB128}) = convert(Int,convert(BigInt,x))
 function Base.show(io::IO, s :: RegStates)
     print(io, "RegStates [", s.delta, "] cfa: ")
     if isa(s.cfa, Tuple{Int,Int})
@@ -200,74 +236,139 @@ function Base.show(io::IO, cie::CIE)
     @printf(io, "CIE align (code:%#x data:%#x) (addr format %s) %d bytes of instructions", cie.code_align, cie.data_align, cie.addr_format, length(cie.initial_code))
 end
 
-function operands(ops, opcode, addrT)
-    if opcode == DWARF.DW_CFA_nop || opcode == DWARF.DW_CFA_remember_state ||
-            opcode == DWARF.DW_CFA_restore_state
-        return ()
-    elseif (opcode & 0xc0) == DWARF.DW_CFA_advance_loc
-        return (opcode & ~0xc0,)
-    elseif (opcode & 0xc0) == DWARF.DW_CFA_restore
-        return (RegNum(opcode & ~0xc0),)
-    elseif (opcode & 0xc0) == DWARF.DW_CFA_offset
-        return (RegNum(opcode & ~0xc0), UInt(read(ops, ULEB128)))
-    elseif opcode == DWARF.DW_CFA_set_loc
-        return (read(ops, addrT),)
-    elseif opcode == DWARF.DW_CFA_advance_loc1
-        return (read(ops, UInt8),)
-    elseif opcode == DWARF.DW_CFA_advance_loc2
-        return (read(ops, UInt16),)
-    elseif opcode == DWARF.DW_CFA_advance_loc4
-        return (read(ops, UInt32),)
-    elseif opcode == DWARF.DW_CFA_offset_extended || opcode == DWARF.DW_CFA_def_cfa
-        reg = RegNum(read(ops, ULEB128))
-        offset = UInt(read(ops, ULEB128))
-        return (reg, offset)
-    elseif opcode == DWARF.DW_CFA_offset_extended_sf || opcode == DWARF.DW_CFA_def_cfa_sf
-        reg = RegNum(read(ops, ULEB128))
-        offset = Int(read(ops, SLEB128))
-        return (reg, offset)
-    elseif opcode == DWARF.DW_CFA_register
-        reg1 = RegNum(read(ops, ULEB128))
-        reg2 = RegNum(read(ops, ULEB128))
-        return (reg1, reg2)
-    elseif opcode == DWARF.DW_CFA_restore_extended || opcode == DWARF.DW_CFA_undefined ||
-            opcode == DWARF.DW_CFA_same_value || opcode == DWARF.DW_CFA_def_cfa_register
-        return (RegNum(read(ops, ULEB128)),)
-    elseif opcode == DWARF.DW_CFA_def_cfa_offset
-        return (UInt(read(ops, ULEB128)),)
-    elseif opcode == DWARF.DW_CFA_def_cfa_expression
-        length = UInt(read(ops, ULEB128))
-        return (read(ops, UInt8, length),)
-    elseif opcode == DWARF.DW_CFA_expression
-        reg =  RegNum(read(ops, ULEB128))
-        length = UInt(read(ops, ULEB128))
-        return (reg, read(ops, UInt8, length))
-    elseif opcode == DWARF.DW_CFA_val_expression
-        val = UInt(read(ops, ULEB128))
-        length = UInt(read(ops, ULEB128))
-        return (val, read(ops, UInt8, length))
-    elseif opcode == DWARF.DW_CFA_def_cfa_offset_sf
-        return (Int(read(ops, SLEB128)), )
-    elseif opcode == DWARF.DW_CFA_val_offset
-        val = UInt(read(ops, ULEB128))
-        offset = UInt(read(ops, ULEB128))
-        return (val, offset)
-    elseif opcode == DWARF.DW_CFA_val_offset_sf
-        val = UInt(read(ops, ULEB128))
-        offset = Int(read(ops, SLEB128))
-        return (val, offset)
-    else
-        error("Unknown opcode")
-    end
+operands(ops, opcode, ::Union{Val{DWARF.DW_CFA_nop}, Val{DWARF.DW_CFA_remember_state},
+                    Val{DWARF.DW_CFA_restore_state}}, addrT)  = ()
+operands(ops, opcode, ::Val{DWARF.DW_CFA_advance_loc}, addrT)  = (opcode & ~0xc0,)
+operands(ops, opcode, ::Val{DWARF.DW_CFA_restore}, addrT)      = (RegNum(opcode & ~0xc0),)
+operands(ops, opcode, ::Val{DWARF.DW_CFA_offset}, addrT)       = (RegNum(opcode & ~0xc0), UInt(read(ops, ULEB128)))
+operands(ops, opcode, ::Val{DWARF.DW_CFA_set_loc}, addrT)      = (read(ops, addrT),)
+operands(ops, opcode, ::Val{DWARF.DW_CFA_advance_loc1}, addrT) = (read(ops, UInt8),)
+operands(ops, opcode, ::Val{DWARF.DW_CFA_advance_loc2}, addrT) = (read(ops, UInt16),)
+operands(ops, opcode, ::Val{DWARF.DW_CFA_advance_loc4}, addrT) = (read(ops, UInt32),)
+operands(ops, opcode, ::Val{DWARF.DW_CFA_def_cfa_offset}, addrT) = (UInt(read(ops, ULEB128)),)
+function operands(ops, opcode, ::Union{Val{DWARF.DW_CFA_offset_extended},
+        Val{DWARF.DW_CFA_def_cfa}}, addrT)
+    reg = RegNum(read(ops, ULEB128))
+    offset = UInt(read(ops, ULEB128))
+    return (reg, offset)
+end
+function operands(ops, opcode, ::Union{Val{DWARF.DW_CFA_offset_extended_sf},
+        Val{DWARF.DW_CFA_def_cfa_sf}}, addrT)
+    reg = RegNum(read(ops, ULEB128))
+    offset = Int(read(ops, SLEB128))
+    return (reg, offset)
+end
+function operands(ops, opcode, ::Val{DWARF.DW_CFA_register}, addrT)
+    reg1 = RegNum(read(ops, ULEB128))
+    reg2 = RegNum(read(ops, ULEB128))
+    return (reg1, reg2)
+end
+function operands(ops, opcode, ::Union{Val{DWARF.DW_CFA_restore_extended},
+        Val{DWARF.DW_CFA_undefined}, Val{DWARF.DW_CFA_same_value},
+        Val{DWARF.DW_CFA_def_cfa_register}}, addrT)
+    return (RegNum(read(ops, ULEB128)),)
+end
+function operands(ops, opcode, ::Val{DWARF.DW_CFA_def_cfa_expression}, addrT)
+    length = UInt(read(ops, ULEB128))
+    return (read(ops, UInt8, length),)
+end
+function operands(ops, opcode, ::Val{DWARF.DW_CFA_expression}, addrT)
+    reg =  RegNum(read(ops, ULEB128))
+    length = UInt(read(ops, ULEB128))
+    return (reg, read(ops, UInt8, length))
+end
+function operands(ops, opcode, ::Val{DWARF.DW_CFA_val_expression}, addrT)
+    val = UInt(read(ops, ULEB128))
+    length = UInt(read(ops, ULEB128))
+    return (val, read(ops, UInt8, length))
+end
+function operands(ops, opcode, ::Val{DWARF.DW_CFA_def_cfa_offset_sf}, addrT)
+    return (Int(read(ops, SLEB128)), )
+end
+function operands(ops, opcode, ::Val{DWARF.DW_CFA_val_offset}, addrT)
+    val = UInt(read(ops, ULEB128))
+    offset = UInt(read(ops, ULEB128))
+    return (val, offset)
+end
+function operands(ops, opcode, ::Val{DWARF.DW_CFA_val_offset_sf}, addrT)
+    val = UInt(read(ops, ULEB128))
+    offset = Int(read(ops, SLEB128))
+    return (val, offset)
+end
+operands{u}(ops, opcode::Val{u}, addrT) = error("Unknown opcode $u")
+function operands(ops, opcode::Integer, addrT)
+    op = (opcode & 0xc0)
+    (op == 0) && (op = opcode)
+    operands(ops, opcode, Val{op}(), addrT)
 end
 
-function evaluage_op(s :: RegStates, ops, cie :: CIE; initial_rs = RegStates())
-    op = read(ops, UInt8)
+# This rewrites an ifnest
+# if a == 4
+# end
+# into
+# if a == 4
+# a = 4
+# end
+# which is currently required for type inference to do its job. Once type
+# inference improves, this should be removed.
+using Base.Meta
+function rewrite_condition(assgn, expr)
+    if isexpr(expr, :if)
+        condition = expr.args[1]
+        if isexpr(condition, :(||))
+            or = condition
+            condition = condition.args[1]
+            expr.args[1] = condition
+            oldargs3 = expr.args[3]
+            expr.args[3] = quote
+                if $(or.args[2])
+                    $(copy(expr.args[2]))
+                else
+                    $oldargs3
+                end
+            end
+        end
+        @assert isexpr(condition, :call) && condition.args[1] == :(==)
+        eq = Base.Expr(:(=), condition.args[2], condition.args[3])
+        expr.args[2] = quote
+            $eq
+            let $assgn
+                $(expr.args[2])
+            end
+        end
+        for i = 1:length(expr.args[3].args)
+            expr.args[3].args[i] = rewrite_condition(assgn, expr.args[3].args[i])
+        end
+    elseif isexpr(expr, :block)
+        for i = 1:length(expr.args)
+            expr.args[i] = rewrite_condition(assgn, expr.args[i])
+        end
+    end
+    expr
+end
+
+macro rewrite_if(assgn, ifnest)
+    expr = rewrite_condition(assgn, ifnest)
+    esc(expr)
+end
+
+# This function is a bit of a hotspot. The slightly odd structure is the result
+# of wanting to be able to use the same code to inspect (print) and evaluate the
+# operands. Naively, one could evaluate the operands first. However, since
+# typeinference is not path-sensitive that would be slow. Instead, we call the
+# operands() function only once op is known, which should allow type inference
+# to fully inline the function.
+function evaluage_op(s :: RegStates, opio, cie :: CIE, initial_rs = RegStates())
+    opcode = read(opio, UInt8)
+    op = (opcode & 0xc0)
+    (op == 0) && (op = opcode)
     # Section 6.4.2 of DWARF 4
-    opops = operands(ops, op, UInt64)
-    if op == DWARF.DW_CFA_set_loc                 # 6.4.2.1 Row creation
+    # The macro is for performance, you may pretend it isn't there when reading
+    # this code.
+    @rewrite_if (opops = operands(opio, opcode, Val{op}(), UInt64)) if
+        op == DWARF.DW_CFA_set_loc                 # 6.4.2.1 Row creation
         error()
-    elseif (op & 0xc0) == DWARF.DW_CFA_advance_loc || op == DWARF.DW_CFA_advance_loc1 ||
+    elseif op == DWARF.DW_CFA_advance_loc || op == DWARF.DW_CFA_advance_loc1 ||
             op == DWARF.DW_CFA_advance_loc2 || op == DWARF.DW_CFA_advance_loc4
         s.delta += opops[1] * cie.code_align
     elseif op == DWARF.DW_CFA_def_cfa             # 6.4.2.2 CFA definitions
@@ -277,29 +378,29 @@ function evaluage_op(s :: RegStates, ops, cie :: CIE; initial_rs = RegStates())
     elseif op == DWARF.DW_CFA_def_cfa_register
         s.cfa = (opops[1], s.cfa[2])
     elseif op == DWARF.DW_CFA_def_cfa_offset
-        s.cfa = (s.cfa[1], Int(opops[1]))
+        s.cfa = ((s.cfa::RegOff)[1], Int(opops[1]))
     elseif op == DWARF.DW_CFA_def_cfa_offset_sf
-        s.cfa = (s.cfa[1], Int(opops[1]*cie.data_align))
+        s.cfa = ((s.cfa::RegOff)[1], Int(opops[1]*cie.data_align))
     elseif op == DWARF.DW_CFA_def_cfa_expression
         s.cfa = Expr(opops[1], false)
     elseif op == DWARF.DW_CFA_undefined           # 6.4.2.3 Register rules
         s[opops[1]] = Undef()
     elseif op == DWARF.DW_CFA_same_value
         s[opops[1]] = Same()
-    elseif (op & 0xc0) == DWARF.DW_CFA_offset
+    elseif op == DWARF.DW_CFA_offset
         s[opops[1]] = Offset(Int(opops[2])*cie.data_align, false)
     elseif op == DWARF.DW_CFA_offset_extended || op == DWARF.DW_CFA_offset_extended_sf
     # Note, we assume here that DW_CFA_offset_extended uses a factored offset
     # even though the DWARF specification does not clearly state this.
         s[opops[1]] = Offset(Int(opops[2])*cie.data_align, false)
-    elseif op == DWARF.DW_CFA_val_offset || op == op == DWARF.DW_CFA_val_offset_sf
+    elseif op == DWARF.DW_CFA_val_offset || op == DWARF.DW_CFA_val_offset_sf
         s[opops[1]] = Offset(opops[2]*cie.data_align, true)
     elseif op == DWARF.DW_CFA_register
-        s[opops[1]] = Reg(opops[2])
+        s[opops[1]] = Reg(opops[2]);
     elseif op == DWARF.DW_CFA_expression ||
            op == DWARF.DW_CFA_val_expression
         error()
-    elseif (op & 0xc0) == DWARF.DW_CFA_restore ||
+    elseif op == DWARF.DW_CFA_restore ||
            op == DWARF.DW_CFA_restore_extended
         s[opops[1]] = initial_rs[opops[1]]
     elseif op == DWARF.DW_CFA_remember_state    # 6.4.2.4 Row state
@@ -310,24 +411,27 @@ function evaluage_op(s :: RegStates, ops, cie :: CIE; initial_rs = RegStates())
     else
         error("unknown CFA opcode $op")
     end
+    nothing
 end
 
 function read_lenid(io)
-    len = read(io, UInt32)
+    len::UInt64 = read(io, UInt32)
+    ls = sizeof(UInt32)
     len > 0 || return error()
     if len == 0xffffffff
         len = read(io, UInt64)
+        ls = sizeof(UInt64)
     end
     begpos = position(io)
     id = read(io, UInt32)
-    len, begpos, id
+    ls, len, begpos, id
 end
 
 function realize(ref::CIERef)
     seek(ref.eh_frame, ref.offset)
-    len, begpos, id = read_lenid(ref.eh_frame)
+    ls, len, begpos, id = read_lenid(ref.eh_frame)
     @assert id == 0
-    read_cie(ref.eh_frame, len)
+    read_cie(ref.eh_frame, len, ls)
 end
 
 function _dump_program(out, bytes, eh_frame, endpos, cie, target=0, rs = RegStates())
@@ -362,31 +466,46 @@ function _dump_program(out, bytes, eh_frame, endpos, cie, target=0, rs = RegStat
     (target != 0 && print_with_color(:red, out, "--------------\n"))
 end
 
-function _prepare_program(f, fde::FDERef, cie = nothing)
+function _prepare_program{R}(f, fde::FDERef{R}, cie = nothing)
     eh_frame = fde.eh_frame
     seek(eh_frame, fde.offset)
     length = read(eh_frame, UInt32)
     (length == ~UInt32(0)) && (length = read(eh_frame, UInt64))
     startpos = position(eh_frame)
-    if cie == nothing
-        # Obtain CIERef
-        CIE_pointer = read(eh_frame, typeof(length))
-        cie = CIERef(eh_frame, fde.is_eh_not_debug ?
-            startpos - CIE_pointer : CIE_pointer)
-        cie = realize(cie)
+    # Split to create optimization boundary
+    # Manual union splitting
+    if typeof(length) == UInt32
+        __prepare_program(f, fde, cie, length::UInt32, startpos)
+    else
+        __prepare_program(f, fde, cie, length::UInt64, startpos)
     end
-    seek(eh_frame, startpos + sizeof(length) + 2sizeof(encoding_type(cie.addr_format)))
+end
+function __prepare_program{T,R}(f, fde::FDERef{R}, cie::Void, length::T, startpos)
+    eh_frame = fde.eh_frame
+    # Obtain CIERef
+    CIE_pointer::UInt64 = read(eh_frame, typeof(length))
+    cie = CIERef(eh_frame, fde.is_eh_not_debug ?
+        startpos - CIE_pointer : CIE_pointer)
+    __prepare_program(f, fde, realize(cie), length, startpos)
+end
+function __prepare_program{T,R}(f, fde::FDERef{R}, cie::CIE, length::T, startpos)
+    eh_frame = fde.eh_frame
+    seek(eh_frame, startpos + sizeof(length) + 2sizeof_encoding_type(cie.addr_format))
     augment_length = UInt(read(eh_frame, ULEB128))
     seek(eh_frame, position(eh_frame) + augment_length)
     f(eh_frame, startpos + length, cie, augment_length)
 end
-realize_cie(fde) = _prepare_program((a,b,cie,augment_length)->cie, fde)
+
+function realize_cie(fde)
+    f = (a,b,cie,augment_length)->cie
+    _prepare_program(f, fde, nothing)
+end
 
 """
 Returns the inital ip as a module-relative offset.
 """
 initial_loc(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, augment_length
-    pos = position(eh_frame)-2sizeof(encoding_type(cie.addr_format))-augment_length-1
+    pos = position(eh_frame)-2sizeof_encoding_type(cie.addr_format)-augment_length-1
     seek(eh_frame, pos)
     pos = position(handle(eh_frame))
     enc = read_encoded(eh_frame, cie.addr_format)
@@ -400,7 +519,7 @@ end
 Returns the final ip as a module-relative offset.
 """
 fde_range(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, augment_length
-    pos = position(eh_frame)-2sizeof(encoding_type(cie.addr_format))-augment_length-1
+    pos = position(eh_frame)-2sizeof_encoding_type(cie.addr_format)-augment_length-1
     seek(eh_frame, pos)
     read_encoded(eh_frame, cie.addr_format)
     enc = read_encoded(eh_frame, cie.addr_format)
@@ -417,18 +536,25 @@ dump_program(out, cie::CIE; bytes = false, target = 0, rs = RegStates()) =
     _dump_program(out,  bytes, IOBuffer(cie.initial_code),
         length(cie.initial_code), cie, target, rs)
 
-function evaluate_program(code::Union{IO, SectionRef}, target,
+function evaluate_program(code::IO, target,
         cie, rs = RegStates(), maxpos = (-1 % UInt); initial_rs = RegStates())
     while !eof(code) && position(code) < maxpos && rs.delta <= target
-        evaluage_op(rs, code, cie; initial_rs=initial_rs)
+        evaluage_op(rs, code, cie, initial_rs)
     end
     rs
 end
+function evaluate_program(sec::SectionRef, target,
+        cie, rs = RegStates(), maxpos = (-1 % UInt); initial_rs = RegStates())
+    iomaxpos = maxpos == (-1 % UInt) ? (-1 % UInt) :
+        position(handle(sec).io) + maxpos - position(sec)
+    evaluate_program(handle(sec).io, target, cie, rs, iomaxpos; initial_rs = initial_rs)
+end
 
+const _dummy_rs = RegStates() # microoptimization
 function evaluate_program(fde::FDERef, target; cie = nothing)
     _prepare_program(fde, cie) do eh_frame, endpos, cie, augment_length
         rs = RegStates()
-        evaluate_program(IOBuffer(cie.initial_code), target, cie, rs)
+        evaluate_program(IOBuffer(cie.initial_code), target, cie, rs; initial_rs = _dummy_rs)
         evaluate_program(eh_frame, target, cie, rs, endpos; initial_rs = copy(rs))
         rs
     end
@@ -444,7 +570,7 @@ function forward_to_fde(eh_frame, offset, skipfirst = true)
     while true
         seek(eh_frame, offset)
         eof(eh_frame) && break
-        len, begpos, id = read_lenid(eh_frame)
+        ls, len, begpos, id = read_lenid(eh_frame)
         # Check if we found an fde
         !skipfirst && (id != 0) && return offset
         skipfirst = false
@@ -458,8 +584,8 @@ function Base.next(x::FDEIterator, offset)
     return (FDERef(x.eh_frame, offset, true), forward_to_fde(x.eh_frame, offset))
 end
 
-function read_cie(io, len)
-    beg_pos = position(io) - sizeof(len)
+function read_cie(io, len, ls)
+    beg_pos = position(io) - ls
     version = read(io, UInt8)
     augment = read_cstring(io)
     has_augment_data = false
@@ -498,8 +624,8 @@ function read_cie(io, len)
     CIE(code_align, data_align, addr_format, return_reg, code)
 end
 function Base.read(io::IO, ::Type{CIE})
-    len, begpos, id = read_lenid(io)
-    read_cie(io, len)
+    ls, len, begpos, id = read_lenid(io)
+    read_cie(io, len, ls)
 end
 
 end

@@ -165,7 +165,7 @@ module DWARF
             end
             shift+=7
         end
-        ULEB128(v)
+        ULEB128{T}(v)
     end
     read(io::IO, ::Type{ULEB128}) = read(io,ULEB128{UInt})
 
@@ -238,7 +238,7 @@ module DWARF
             v |= -(T(1)<<shift)
         end
 
-        SLEB128(v)
+        SLEB128{T}(v)
     end
     read(io::IO, ::Type{SLEB128}) = read(io, SLEB128{Int})
 
