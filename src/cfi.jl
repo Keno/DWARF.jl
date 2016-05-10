@@ -655,7 +655,7 @@ function read_cie(io, len, ls)
     has_eh_data = false
     addr_format = DWARF.DW_EH_PE_absptr
     if length(augment) > 0
-        if augment[1] == 'z'
+        if augment[1] == UInt32('z')
             has_augment_data = true
         else
             error("can't parse augment data '$(bytestring(augment))'")
@@ -669,13 +669,13 @@ function read_cie(io, len, ls)
         a_pos = position(io)
         seek(io, a_pos)
         for i = 2:length(augment)
-            if augment[i] == 'R'
+            if augment[i] == UInt32('R')
                 addr_format = read(io, UInt8)
-            elseif augment[i] == 'L'
+            elseif augment[i] == UInt32('L')
                 read(io, UInt8) # TODO use that maybe
-            elseif augment[i] == 'P'
+            elseif augment[i] == UInt32('P')
                 read_encoded(io, read(io, UInt8)) # TODO ditto
-            elseif augment[i] == 'S'
+            elseif augment[i] == UInt32('S')
                 # TODO: ditto (represents a signal frame)
             else
                 warn("unknown augment data '$(Char(augment[i]))' in '$(bytestring(augment))'")
