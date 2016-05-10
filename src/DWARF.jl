@@ -60,7 +60,7 @@ module DWARF
 
         immutable PUBTableEntry <: DWARF.PUBTableEntry
             offset::UInt32
-            name::ASCIIString
+            name::String
         end
 
         immutable PUBTableSet <: DWARF.PUBTableSet
@@ -108,7 +108,7 @@ module DWARF
 
         immutable PUBTableEntry <: DWARF.PUBTableEntry
             offset::UInt64
-            name::ASCIIString
+            name::String
         end
 
         immutable PUBTableSet <: DWARF.PUBTableSet
@@ -574,7 +574,7 @@ module DWARF
         end
 
         immutable FileEntry
-            name::UTF8String
+            name::String
             dir_idx::UInt
             timestamp::UInt
             filelength::UInt
@@ -610,7 +610,7 @@ module DWARF
         immutable Header{T}
             stub::HeaderStub{T}
             standard_opcode_lengths::Vector{UInt8}
-            include_directories::Vector{UTF8String}
+            include_directories::Vector{String}
             file_names::Vector{FileEntry}
         end
 
@@ -621,14 +621,14 @@ module DWARF
                 c == 0 && break
                 push!(ret,c)
             end
-            UTF8String(ret)
+            String(ret)
         end
 
         function read_header(io)
             stub = unpack(io,HeaderStub)
             standard_opcode_lengths = Array(UInt8,max(0,stub.opcode_base-1))
             read!(io,standard_opcode_lengths)
-            include_directories = UTF8String[]
+            include_directories = String[]
             while true
                 s = readstring(io)
                 endof(s) == 0 && break
