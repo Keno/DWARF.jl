@@ -662,7 +662,7 @@ function read_cie(io, len, ls)
         if augment[1] == UInt32('z')
             has_augment_data = true
         else
-            error("can't parse augment data '$(bytestring(augment))'")
+            error("can't parse augment data '$(String(augment))'")
         end
     end
     code_align = read(io, ULEB128)
