@@ -5,7 +5,7 @@ using DWARF: SLEB128, ULEB128
 import DWARF.tag, DWARF.children, DWARF.attributes
 using ObjFileBase
 using ObjFileBase: DebugSections, ObjectHandle, handle
-import Base.read
+import Base: read, setindex!
 using Base: @pure
 function read_cstring(io)
     a = Array(UInt8, 0)
@@ -166,11 +166,11 @@ searchsortedlast_fde(tab, offset) = searchsortedlast(tab, (offset, 0),by = x->x[
 Searches for an FDE covering an ip, represented as an offset from the start
 of the eh_frame_hdr section
 """
-function search_fde_offset(frame_sec, tab, offset, offs_slide = 0)
+function search_fde_offset(frame_sec, tab, offset, offs_slide = 0; is_eh_not_debug = true)
     found_idx = searchsortedlast_fde(tab, offset)
     (found_idx == 0) && error("Not found")
     res = tab[found_idx]
-    (res[1], FDERef(frame_sec, offs_slide + res[2], true))
+    (res[1], FDERef(frame_sec, UInt64(offs_slide + res[2]), is_eh_not_debug))
 end
 
 # eh_frame parsing
@@ -252,7 +252,7 @@ function Base.setindex!(s :: RegStates, val::RegState, n :: Union{Int, RegNum})
     end
     nothing
 end
-function Base.setindex!(s :: RegState, val :: Expr, n :: Union{Int, RegNum})
+function Base.setindex!(s :: RegStates, val :: Expr, n :: Union{Int, RegNum})
     s.values[Int(n)] = ExprRegState
     s.values_expr[Int(n)] = val
 end
@@ -404,8 +404,8 @@ function evaluage_op(s :: RegStates, opio, cie :: CIE, initial_rs = RegStates())
     # Section 6.4.2 of DWARF 4
     # The macro is for performance, you may pretend it isn't there when reading
     # this code.
-    @rewrite_if (opops = operands(opio, opcode, Val{op}(), UInt64)) if
-        op == DWARF.DW_CFA_set_loc                 # 6.4.2.1 Row creation
+    @rewrite_if (opops = operands(opio, opcode, Val{op}(), UInt64)) if (
+        op == DWARF.DW_CFA_set_loc)                # 6.4.2.1 Row creation
         error()
     elseif op == DWARF.DW_CFA_advance_loc || op == DWARF.DW_CFA_advance_loc1 ||
             op == DWARF.DW_CFA_advance_loc2 || op == DWARF.DW_CFA_advance_loc4
@@ -439,7 +439,7 @@ function evaluage_op(s :: RegStates, opio, cie :: CIE, initial_rs = RegStates())
         s[opops[1]] = Reg(opops[2])
     elseif op == DWARF.DW_CFA_expression ||
            op == DWARF.DW_CFA_val_expression
-        error()
+        s[opops[1]] = Expr(opops[2], op == DWARF.DW_CFA_val_expression)
     elseif op == DWARF.DW_CFA_restore ||
            op == DWARF.DW_CFA_restore_extended
         s[opops[1]] = initial_rs[opops[1]]
@@ -614,27 +614,31 @@ function evaluate_program(fde::FDERef, target; cie = nothing, ciecache = nothing
 end
 
 function forward_to_fde_or_cie(eh_frame, offset, skipfirst = true, tofde = true)
+    offset = UInt64(offset)
     while true
         seek(eh_frame, offset)
         eof(eh_frame) && break
         ls, len, begpos, id = read_lenid(eh_frame)
         len == 0 && return sectionsize(eh_frame)
-        # Check if we found an fde
-        !skipfirst && (tofde $ (id == 0)) && return offset
+        # Check if we found an fde. In eh_frame sections CIE_id is 0, in
+        # debug_frame sections CIE_id is 0xffffffff.
+        !skipfirst && (tofde $ (id == 0 || id == ~(typeof(len)(0)))) && return offset
         skipfirst = false
-        offset = begpos + len
+        offset = UInt64(begpos + len)
     end
     return offset
 end
 
 immutable FDEIterator
     eh_frame::SectionRef
+    is_eh_not_debug::Bool
 end
+FDEIterator(eh_frame::SectionRef) = FDEIterator(eh_frame, true)
 Base.iteratorsize(::Type{FDEIterator}) = Base.SizeUnknown()
 Base.done(x::FDEIterator, offset) = offset >= sectionsize(x.eh_frame)
 Base.start(x::FDEIterator) = forward_to_fde_or_cie(x.eh_frame, 0, false, true)
 function Base.next(x::FDEIterator, offset)
-    return (FDERef(x.eh_frame, offset, true), forward_to_fde_or_cie(x.eh_frame, offset))
+    return (FDERef(x.eh_frame, offset, x.is_eh_not_debug), forward_to_fde_or_cie(x.eh_frame, offset))
 end
 
 immutable CIEIterator
