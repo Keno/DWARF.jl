@@ -467,7 +467,7 @@ module DWARF
                 push!(s.stack,opcode-DWARF.DW_OP_lit1+1)
             elseif opcode >= DWARF.DW_OP_breg0 && opcode <= DWARF.DW_OP_breg31
                 (i,offset) = operands(T,opcode,opcodes,i,endianness)
-                push!(s.stack,getreg_func(opcode-DWARF.DW_OP_breg0) + offset)
+                push!(s.stack,Int(getreg_func(opcode-DWARF.DW_OP_breg0)) + offset)
             elseif opcode == DWARF.DW_OP_fbreg
                 (i,offset) = operands(T,opcode,opcodes,i,endianness)
                 val = getreg_func(opcode)
@@ -480,6 +480,8 @@ module DWARF
                 i -= 1
             elseif opcode == DWARF.DW_OP_nop
                 #NOP
+            elseif opcode == DWARF.DW_OP_stack_value
+                # Handled explicitly elsewhere
             else
                 return (i-1,false)
             end
@@ -489,11 +491,14 @@ module DWARF
         function evaluate_generic{T}(s::StateMachine{T},opcodes::Array{UInt8,1},getreg_func::Function,getword_func,addr_func,endianness::Symbol)
             i=1
             while i <= length(opcodes)
+                (opcodes[i] == DWARF.DW_OP_stack_value) &&
+                    return true
                 i,res = evaluate_generic_instruction(s,opcodes,i,getreg_func,getword_func,addr_func,endianness)
                 if !res
                     error("Unrecognized Opcode ",opcodes[i])
                 end
             end
+            return false
         end
 
         function op_name(opcode)
@@ -545,8 +550,11 @@ module DWARF
                 (i,val) = DWARF.decode(opcodes,i+1,ULEB128{UInt})
                 return RegisterLocation(val)
             else
-                evaluate_generic(s,opcodes,getreg_func,getword_func,addr_func,endianness)
-                return MemoryLocation{T}(last(s.stack))
+                if evaluate_generic(s,opcodes,getreg_func,getword_func,addr_func,endianness)
+                    return last(s.stack)
+                else
+                    return MemoryLocation{T}(last(s.stack))
+                end
             end
         end
     end
@@ -1119,7 +1127,7 @@ module DWARF
                 break
             else
                 length = read(io, UInt16)
-                push!(ret,LocationListEntry{T}(start,last,readbytes(io,length)))
+                push!(ret,LocationListEntry{T}(start,last,read(io,length)))
             end
         end
         LocationList{T}(ret)
