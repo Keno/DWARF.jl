@@ -127,6 +127,7 @@ function next{T}(x::UnitIterator{T}, offset)
     (ret, next_offset)
 end
 done(x::UnitIterator, off) = off >= sectionoffset(x.unit_section) + sectionsize(x.unit_section)
+Base.iteratorsize{T<:UnitIterator}(::Type{T}) = Base.SizeUnknown()
 
 function realize(ref::LightDIERef)
     seek(ref.io, ref.offset)

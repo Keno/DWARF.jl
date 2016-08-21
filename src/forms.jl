@@ -48,6 +48,8 @@ function Base.show(io::IO, at::Attribute)
         print(io,target_name,"[0x",hex(at.value.offset,
             2*sizeof(at.value.offset > typemax(UInt32) ?
                 at.value.offset : UInt32)),"]")
+    elseif at.spec.form == DWARF.DW_FORM_string
+        print(io, String(at.value))
     elseif at.spec.name == DWARF.DW_AT_language && haskey(DWARF.DW_LANG, at.value)
         print(io, at.value, " (", DWARF.DW_LANG[at.value], ")")
     else
