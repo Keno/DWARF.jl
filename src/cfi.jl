@@ -24,11 +24,13 @@ immutable FDERef{SR<:SectionRef}
     offset::UInt
     # Distinguish between FDEs in eh_frame (true) or debug_frame
     is_eh_not_debug::Bool
+    ptrT::Union{Type{UInt32},Type{UInt64}}
 end
 
 immutable CIERef{SR<:SectionRef}
     eh_frame::SR
     offset::UInt
+    ptrT::Union{Type{UInt32},Type{UInt64}}
 end
 
 
@@ -37,12 +39,12 @@ immutable DataRel; ptr; end
 immutable PcRel; ptr; end
 immutable Indirect; ptr; end
 
-@pure function encoding_type(encoding)
+@pure function encoding_type(encoding, ptrT)
     data_enc = (encoding & 0xf)
     if data_enc == DWARF.DW_EH_PE_uleb128
         return ULEB128
     elseif data_enc == DWARF.DW_EH_PE_absptr
-        return Ptr{Void}
+        return ptrT
     elseif data_enc == DWARF.DW_EH_PE_omit
         return Void
     elseif data_enc == DWARF.DW_EH_PE_udata2
@@ -63,14 +65,14 @@ immutable Indirect; ptr; end
         error("Unknown encoding type ($data_enc)")
     end
 end
-const sizeof_map = UInt8[try; sizeof(encoding_type(i)); catch; 0; end for i=0:0xc]
-sizeof_encoding_type(enc) = sizeof_map[(enc&0xf)+1]
+const sizeof_map = UInt8[try; sizeof(encoding_type(i,UInt64)); catch; 0; end for i=0:0xc]
+sizeof_encoding_type(enc, ptrT) = ((enc&0xf) == DWARF.DW_EH_PE_absptr) ? sizeof(ptrT) : sizeof_map[(enc&0xf)+1]
 
 
 
-function read_encoded(io, encoding)
+function read_encoded(io, encoding, ptrT)
     (encoding == DWARF.DW_EH_PE_omit) && return nothing
-    res = read(io, encoding_type(encoding))
+    res = read(io, encoding_type(encoding, ptrT))
     base_enc = encoding & 0x70
     res = (base_enc == DWARF.DW_EH_PE_datarel) ? DataRel(res) :
         (base_enc == DWARF.DW_EH_PE_pcrel) ? PcRel(res) :
@@ -96,8 +98,9 @@ function read{T<:ObjFileBase.ObjectHandle}(io::SectionRef{T}, ::Type{eh_frame_hd
     eh_frame_ptr_enc = read(io, UInt8)
     fde_count_enc = read(io, UInt8)
     table_enc = read(io, UInt8)
-    eh_frame_ptr = read_encoded(io, eh_frame_ptr_enc)
-    fde_count = UInt(read_encoded(io, fde_count_enc))
+    ptrT = ObjFileBase.intptr(ObjFileBase.handle(io))
+    eh_frame_ptr = read_encoded(io, eh_frame_ptr_enc, ptrT)
+    fde_count = UInt(read_encoded(io, fde_count_enc, ptrT))
     eh_frame_hdr(eh_frame_ptr, fde_count, position(io), table_enc)
 end
 
@@ -111,15 +114,17 @@ EhFrameRef(hdr_sec::SectionRef, frame_sec::SectionRef) =
 Base.length(ehfr::EhFrameRef) = Int(ehfr.header.fde_count)
 Base.size(ehfr::EhFrameRef) = (length(ehfr),)
 
-@pure function compute_entry_type(enc::Integer)
+@pure function compute_entry_type(enc::Integer, ptrT)
     # First check that the encoding is indeed datarel
     @assert (enc & 0xf0) == DWARF.DW_EH_PE_datarel
-    entry_field_T = encoding_type(enc)
+    entry_field_T = encoding_type(enc, ptrT)
     # We also require fixed-size entries, otherwise we can't really binary search
     @assert !isa(entry_field_T, DWARF.LEB128)
     entry_field_T
 end
-compute_entry_type(ehfr::EhFrameRef) = compute_entry_type(hfr.header.table_enc)
+compute_entry_type(ehfr::EhFrameRef,
+    ptrT=ObjFileBase.intptr(ObjFileBase.handle(ehfr.hdr_sec))) =
+        compute_entry_type(ehfr.header.table_enc, ptrT)
 
 seekentry(ehfr, idx, entry_size=2sizeof(compute_entry_type(ehfr))) =
     seek(ehfr.hdr_sec, ehfr.header.table_offset + (idx-1)*entry_size)
@@ -133,9 +138,10 @@ function Base.getindex(ehfr::EhFrameRef, idx)
     # Fast-path the standard case
     enc = ehfr.header.table_enc
     if enc == 0x3b
-        Base.getindex(ehfr, idx, compute_entry_type(0x3b))
+        # ptrT is irrelevant
+        Base.getindex(ehfr, idx, compute_entry_type(0x3b, UInt64))
     else
-        Base.getindex(ehfr, idx, compute_entry_type(enc))::Tuple{Int,Int}
+        Base.getindex(ehfr, idx, compute_entry_type(ehfr))::Tuple{Int,Int}
     end
 end
 
@@ -157,8 +163,8 @@ end
 function searchsortedlast_fde(ehfr::EhFrameRef, offset)
     # Fast-path the standard case
     enc = ehfr.header.table_enc
-    enc == 0x3b ? searchsortedlast_fde(ehfr, offset, compute_entry_type(0x3b)) :
-        searchsortedlast_fde(ehfr, offset, compute_entry_type(enc))
+    enc == 0x3b ? searchsortedlast_fde(ehfr, offset, compute_entry_type(0x3b, UInt64)) :
+        searchsortedlast_fde(ehfr, offset, compute_entry_type(ehfr))
 end
 searchsortedlast_fde(tab, offset) = searchsortedlast(tab, (offset, 0),by = x->x[1])
 
@@ -166,11 +172,12 @@ searchsortedlast_fde(tab, offset) = searchsortedlast(tab, (offset, 0),by = x->x[
 Searches for an FDE covering an ip, represented as an offset from the start
 of the eh_frame_hdr section
 """
-function search_fde_offset(frame_sec, tab, offset, offs_slide = 0; is_eh_not_debug = true)
+function search_fde_offset(frame_sec, tab, offset, offs_slide = 0;
+        is_eh_not_debug = true, ptrT = ObjFileBase.intptr(ObjFileBase.handle(frame_sec)))
     found_idx = searchsortedlast_fde(tab, offset)
     (found_idx == 0) && error("Not found")
     res = tab[found_idx]
-    (res[1], FDERef(frame_sec, UInt64(offs_slide + res[2]), is_eh_not_debug))
+    (res[1], FDERef(frame_sec, UInt64(offs_slide + res[2]), is_eh_not_debug, ptrT))
 end
 
 # eh_frame parsing
@@ -270,6 +277,7 @@ immutable CIE
     addr_format :: UInt8
     return_reg :: UInt8
     initial_code :: Vector{UInt8}
+    has_augment_data :: Bool
 end
 function Base.show(io::IO, cie::CIE)
     @printf(io, "CIE align (code:%#x data:%#x) (addr format %s) %d bytes of instructions", cie.code_align, cie.data_align, cie.addr_format, length(cie.initial_code))
@@ -470,22 +478,22 @@ end
 function realize(ref::CIERef)
     seek(ref.eh_frame, ref.offset)
     ls, len, begpos, id = read_lenid(ref.eh_frame)
-    @assert id == 0
-    read_cie(ref.eh_frame, len, ls)
+    @assert (id == 0 || id == ~(typeof(id)(0)))
+    read_cie(ref.eh_frame, len, ls, ref.ptrT)
 end
 
-function _dump_program(out, bytes, eh_frame, endpos, cie, target=0, rs = RegStates())
+function _dump_program(out, bytes, eh_frame, endpos, cie, ptrT, target=0, rs = RegStates())
     bytes && (return read(eh_frame, UInt8, endpos - position(eh_frame)))
     while position(eh_frame) < endpos
         oppos = position(eh_frame)
         op = read(eh_frame, UInt8)
         opcode = (op & 0xc0) != 0 ? (op & 0xc0) : op
         print_with_color(:blue, out, DWARF.DW_CFA[opcode])
-        for operand in operands(eh_frame, op, encoding_type(cie.addr_format))
+        for operand in operands(eh_frame, op, encoding_type(cie.addr_format, ptrT))
             print(out, ' ')
             if isa(operand, Array)
                 DWARF.Expressions.print_expression(out,
-                    encoding_type(cie.addr_format), operand, :NativeEndian)
+                    encoding_type(cie.addr_format, ptrT), operand, :NativeEndian)
             else
                 print(out, operand)
             end
@@ -526,7 +534,7 @@ function __prepare_program{T,R}(f, fde::FDERef{R}, cie::Void, ciecache, length::
     CIE_pointer::UInt64 = read(eh_frame, typeof(length))
     cieoff = fde.is_eh_not_debug ? startpos - CIE_pointer : CIE_pointer
     if ciecache == nothing
-        __prepare_program(f, fde, realize(CIERef(eh_frame, cieoff)), ciecache, length, startpos, 0)
+        __prepare_program(f, fde, realize(CIERef(eh_frame, cieoff, fde.ptrT)), ciecache, length, startpos, 0)
     else
         ccoff = findfirst(ciecache.offsets, cieoff)
         __prepare_program(f, fde, ciecache.cies[ccoff], ciecache, length, startpos, ccoff)
@@ -534,9 +542,10 @@ function __prepare_program{T,R}(f, fde::FDERef{R}, cie::Void, ciecache, length::
 end
 function __prepare_program{T,R}(f, fde::FDERef{R}, cie::CIE, ciecache, length::T, startpos, ccoff)
     eh_frame = fde.eh_frame
-    seek(eh_frame, startpos + sizeof(length) + 2sizeof_encoding_type(cie.addr_format))
-    augment_length = UInt(read(eh_frame, ULEB128))
+    seek(eh_frame, startpos + sizeof(length) + 2sizeof_encoding_type(cie.addr_format, fde.ptrT))
+    augment_length = cie.has_augment_data ? UInt(read(eh_frame, ULEB128)) : 0
     seek(eh_frame, position(eh_frame) + augment_length)
+    cie.has_augment_data && (augment_length += 1) # For the augment_length itself
     f(eh_frame, startpos + length, cie, augment_length, ccoff)
 end
 
@@ -554,10 +563,10 @@ end
 Returns the inital ip as a module-relative offset.
 """
 initial_loc(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, augment_length, __
-    pos = position(eh_frame)-2sizeof_encoding_type(cie.addr_format)-augment_length-1
+    pos = position(eh_frame)-2sizeof_encoding_type(cie.addr_format, fde.ptrT)-augment_length
     seek(eh_frame, pos)
     pos = position(handle(eh_frame))
-    enc = read_encoded(eh_frame, cie.addr_format)
+    enc = read_encoded(eh_frame, cie.addr_format, fde.ptrT)
     if isa(enc, PcRel)
         enc = pos + Int64(enc.ptr)
     end
@@ -568,10 +577,10 @@ end
 Returns the final ip as a module-relative offset.
 """
 fde_range(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, augment_length, __
-    pos = position(eh_frame)-2sizeof_encoding_type(cie.addr_format)-augment_length-1
+    pos = position(eh_frame)-2sizeof_encoding_type(cie.addr_format, fde.ptrT)-augment_length
     seek(eh_frame, pos)
-    read_encoded(eh_frame, cie.addr_format)
-    enc = read_encoded(eh_frame, cie.addr_format)
+    read_encoded(eh_frame, cie.addr_format, fde.ptrT)
+    enc = read_encoded(eh_frame, cie.addr_format, fde.ptrT)
     if isa(enc, PcRel) # The modifier does not apply to the range
         enc = enc.ptr
     end
@@ -579,11 +588,11 @@ fde_range(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie, 
 end
 
 dump_program(out::IO, fde::FDERef; cie = nothing, bytes = false, target = 0, rs = RegStates()) =
-    _prepare_program((a,b,c,_,__)->_dump_program(out, bytes, a,b,c, target, rs), fde, cie)
+    _prepare_program((a,b,c,_,__)->_dump_program(out, bytes, a,b,c, fde.ptrT, target, rs), fde, cie)
 
-dump_program(out, cie::CIE; bytes = false, target = 0, rs = RegStates()) =
+dump_program(out, cie::CIE; ptrT = UInt64, bytes = false, target = 0, rs = RegStates()) =
     _dump_program(out,  bytes, IOBuffer(cie.initial_code),
-        length(cie.initial_code), cie, target, rs)
+        length(cie.initial_code), cie, ptrT, target, rs)
 
 function evaluate_program(code::IO, target,
         cie, rs = RegStates(), maxpos = (-1 % UInt); initial_rs = RegStates())
@@ -613,7 +622,7 @@ function evaluate_program(fde::FDERef, target; cie = nothing, ciecache = nothing
     end::RegStates
 end
 
-function forward_to_fde_or_cie(eh_frame, offset, skipfirst = true, tofde = true)
+function forward_to_fde_or_cie(eh_frame, offset, is_eh_not_debug=true, skipfirst = true, tofde = true)
     offset = UInt64(offset)
     while true
         seek(eh_frame, offset)
@@ -622,7 +631,7 @@ function forward_to_fde_or_cie(eh_frame, offset, skipfirst = true, tofde = true)
         len == 0 && return sectionsize(eh_frame)
         # Check if we found an fde. In eh_frame sections CIE_id is 0, in
         # debug_frame sections CIE_id is 0xffffffff.
-        !skipfirst && (tofde $ (id == 0 || id == ~(typeof(len)(0)))) && return offset
+        !skipfirst && (tofde $ (is_eh_not_debug ? id == 0 : id == ~(typeof(id)(0)))) && return offset
         skipfirst = false
         offset = UInt64(begpos + len)
     end
@@ -632,26 +641,30 @@ end
 immutable FDEIterator
     eh_frame::SectionRef
     is_eh_not_debug::Bool
+    ptrT::Union{Type{UInt32},Type{UInt64}}
 end
-FDEIterator(eh_frame::SectionRef) = FDEIterator(eh_frame, true)
+FDEIterator(eh_frame::SectionRef, ptrT) = FDEIterator(eh_frame, true, ptrT)
 Base.iteratorsize(::Type{FDEIterator}) = Base.SizeUnknown()
 Base.done(x::FDEIterator, offset) = offset >= sectionsize(x.eh_frame)
-Base.start(x::FDEIterator) = forward_to_fde_or_cie(x.eh_frame, 0, false, true)
+Base.start(x::FDEIterator) = forward_to_fde_or_cie(x.eh_frame, 0, x.is_eh_not_debug, false, true)
 function Base.next(x::FDEIterator, offset)
-    return (FDERef(x.eh_frame, offset, x.is_eh_not_debug), forward_to_fde_or_cie(x.eh_frame, offset))
+    return (FDERef(x.eh_frame, offset, x.is_eh_not_debug, x.ptrT), forward_to_fde_or_cie(x.eh_frame, offset, x.is_eh_not_debug))
 end
 
 immutable CIEIterator
-    eh_frame::SectionRef    
+    eh_frame::SectionRef
+    is_eh_not_debug::Bool
+    ptrT::Union{Type{UInt32},Type{UInt64}}
 end
+CIEIterator(eh_frame, is_eh_not_debug) = CIEIterator(eh_frame, is_eh_not_debug, ObjFileBase.intptr(ObjFileBase.handle(eh_frame)))
 Base.iteratorsize(::Type{CIEIterator}) = Base.SizeUnknown()
 Base.done(x::CIEIterator, offset) = offset >= sectionsize(x.eh_frame)
-Base.start(x::CIEIterator) = forward_to_fde_or_cie(x.eh_frame, 0, false, false)
+Base.start(x::CIEIterator) = forward_to_fde_or_cie(x.eh_frame, 0, x.is_eh_not_debug, false, false)
 function Base.next(x::CIEIterator, offset)
-    return (CIERef(x.eh_frame, UInt(offset)), forward_to_fde_or_cie(x.eh_frame, offset, true, false))
+    return (CIERef(x.eh_frame, UInt(offset), x.ptrT), forward_to_fde_or_cie(x.eh_frame, offset, x.is_eh_not_debug, true, false))
 end
 
-function read_cie(io, len, ls)
+function read_cie(io, len, ls, ptrT)
     beg_pos = position(io) - ls
     version = read(io, UInt8)
     augment = read_cstring(io)
@@ -678,7 +691,7 @@ function read_cie(io, len, ls)
             elseif augment[i] == UInt32('L')
                 read(io, UInt8) # TODO use that maybe
             elseif augment[i] == UInt32('P')
-                read_encoded(io, read(io, UInt8)) # TODO ditto
+                read_encoded(io, read(io, UInt8), ptrT) # TODO ditto
             elseif augment[i] == UInt32('S')
                 # TODO: ditto (represents a signal frame)
             else
@@ -688,7 +701,7 @@ function read_cie(io, len, ls)
         seek(io, augment_length + a_pos)
     end
     code = read(io, UInt8, len - (position(io) - beg_pos))
-    CIE(code_align, data_align, addr_format, return_reg, code)
+    CIE(code_align, data_align, addr_format, return_reg, code, has_augment_data)
 end
 function Base.read(io::IO, ::Type{CIE})
     ls, len, begpos, id = read_lenid(io)
@@ -703,9 +716,9 @@ immutable CIECache
 end
 CIECache() = CIECache(Vector{UInt}(), Vector{CIE}(), Vector{RegStates}())
 
-function precompute(eh_frame_sec)
+function precompute(eh_frame_sec, is_eh_not_debug=true)
     cache = CIECache()
-    for cieref in CIEIterator(eh_frame_sec)
+    for cieref in CIEIterator(eh_frame_sec, is_eh_not_debug)
         push!(cache.offsets, cieref.offset)
         push!(cache.cies, realize(cieref))
         rs = RegStates()
