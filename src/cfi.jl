@@ -568,7 +568,7 @@ initial_loc(fde, cie = nothing) = _prepare_program(fde, cie) do eh_frame, _, cie
     pos = position(handle(eh_frame))
     enc = read_encoded(eh_frame, cie.addr_format, fde.ptrT)
     if isa(enc, PcRel)
-        enc = pos + Int64(enc.ptr)
+        enc = pos + (enc.ptr%Int64)
     end
     enc
 end
