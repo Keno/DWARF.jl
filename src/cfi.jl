@@ -151,14 +151,14 @@ function searchsortedlast_fde{T}(ehfr::EhFrameRef, offset, entry_type::Type{T})
     hi = length(ehfr)
     @inbounds while lo < hi-1
         m = (lo+hi)>>>1
-        seekentry(ehfr, m, 2sizeof(entry_type))
+        seekentry(ehfr, m+1, 2sizeof(entry_type))
         if offset < read(ehfr.hdr_sec, entry_type)::entry_type
             hi = m
         else
             lo = m
         end
     end
-    return lo
+    return lo+1
 end
 function searchsortedlast_fde(ehfr::EhFrameRef, offset)
     # Fast-path the standard case
