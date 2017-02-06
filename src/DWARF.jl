@@ -463,8 +463,8 @@ module DWARF
                 end
             elseif opcode == DWARF.DW_OP_call2 || opcode == DWARF.DW_OP_call4 || opcode == DWARF.DW_OP_call_ref
                 error("Unimplemented")
-            elseif opcode >= DWARF.DW_OP_lit1 && opcode <= DWARF.DW_OP_lit31
-                push!(s.stack,opcode-DWARF.DW_OP_lit1+1)
+            elseif opcode >= DWARF.DW_OP_lit0 && opcode <= DWARF.DW_OP_lit31
+                push!(s.stack,opcode-DWARF.DW_OP_lit0)
             elseif opcode >= DWARF.DW_OP_breg0 && opcode <= DWARF.DW_OP_breg31
                 (i,offset) = operands(T,opcode,opcodes,i,endianness)
                 push!(s.stack,Int(getreg_func(opcode-DWARF.DW_OP_breg0)) + offset)
@@ -542,8 +542,8 @@ module DWARF
 
         function evaluate_simple_location{T}(s::StateMachine{T},opcodes::Array{UInt8,1},
                 getreg_func::Function,getword_func,addr_func,endianness::Symbol)
-            i=1
-            opcode = opcodes[i]
+            isempty(opcodes) && return MemoryLocation{T}(last(s.stack))
+            opcode = first(opcodes)
             if opcode >= DWARF.DW_OP_reg0 && opcode <= DWARF.DW_OP_reg31
                 return RegisterLocation(opcode-DWARF.DW_OP_reg0)
             elseif opcode == DWARF.DW_OP_regx

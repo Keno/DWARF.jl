@@ -281,6 +281,7 @@ end
     const DW_OP_le = 0x2c # 0
     const DW_OP_lt = 0x2d # 0
     const DW_OP_ne = 0x2e # 0
+    const DW_OP_lit0 = 0x30 # 0
     const DW_OP_lit1 = 0x31 # 0
     const DW_OP_lit31 = 0x4f # 0
     const DW_OP_reg0 = 0x50 # 0

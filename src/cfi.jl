@@ -250,7 +250,7 @@ RegStates() = RegStates(Dict{Int,RegState}(), Dict{Int,Expr}(), Array(Tuple{Dict
 Base.copy(s::RegStates) = RegStates(copy(s.values),copy(s.values_expr),copy(s.stack),s.cfa,s.cfa_expr,s.delta)
 
 Base.getindex(s :: RegStates, n) = get(s.values, n, Undef())
-function Base.setindex!(s :: RegStates, val::RegState, n :: Union{Int, RegNum})
+function Base.setindex!(s :: RegStates, val::RegState, n :: Union{Integer, RegNum})
     @assert(!isdwarfexpr(val))
     if isundef(val)
         delete!(s.values, Int(n))
@@ -259,7 +259,7 @@ function Base.setindex!(s :: RegStates, val::RegState, n :: Union{Int, RegNum})
     end
     nothing
 end
-function Base.setindex!(s :: RegStates, val :: Expr, n :: Union{Int, RegNum})
+function Base.setindex!(s :: RegStates, val :: Expr, n :: Union{Integer, RegNum})
     s.values[Int(n)] = ExprRegState
     s.values_expr[Int(n)] = val
 end
@@ -405,7 +405,7 @@ end
 # typeinference is not path-sensitive that would be slow. Instead, we call the
 # operands() function only once op is known, which should allow type inference
 # to fully inline the function.
-function evaluage_op(s :: RegStates, opio, cie :: CIE, initial_rs = RegStates())
+function evaluate_op(s :: RegStates, opio, cie :: CIE, initial_rs = RegStates())
     opcode = read(opio, UInt8)
     op = (opcode & 0xc0)
     (op == 0) && (op = opcode)
@@ -492,15 +492,14 @@ function _dump_program(out, bytes, eh_frame, endpos, cie, ptrT, target=0, rs = R
         for operand in operands(eh_frame, op, encoding_type(cie.addr_format, ptrT))
             print(out, ' ')
             if isa(operand, Array)
-                DWARF.Expressions.print_expression(out,
-                    encoding_type(cie.addr_format, ptrT), operand, :NativeEndian)
+                DWARF.Expressions.print_expression(out, ptrT, operand, :NativeEndian)
             else
                 print(out, operand)
             end
         end
         
         seek(eh_frame, oppos)
-        evaluage_op(rs, eh_frame, cie)
+        evaluate_op(rs, eh_frame, cie)
         if (op & 0xc0) == DWARF.DW_CFA_advance_loc || op == DWARF.DW_CFA_advance_loc1 ||
                 op == DWARF.DW_CFA_advance_loc2 || op == DWARF.DW_CFA_advance_loc4
             print(out," (=> $(rs.delta))")
@@ -597,7 +596,7 @@ dump_program(out, cie::CIE; ptrT = UInt64, bytes = false, target = 0, rs = RegSt
 function evaluate_program(code::IO, target,
         cie, rs = RegStates(), maxpos = (-1 % UInt); initial_rs = RegStates())
     while !eof(code) && position(code) < maxpos && rs.delta <= target
-        evaluage_op(rs, code, cie, initial_rs)
+        evaluate_op(rs, code, cie, initial_rs)
     end
     rs
 end
