@@ -57,12 +57,12 @@ function Base.show(io::IO, at::Attribute)
     end
 end
 
-function Base.bytestring(at::Attribute, strtab = nothing)
+function Base.string(at::Attribute, strtab = nothing)
     if at.spec.form == DWARF.DW_FORM_string
-        return bytestring(at.value)
+        return string(at.value)
     elseif at.spec.form == DWARF.DW_FORM_strp
         @assert strtab !== nothing
-        bytestring(at.value, strtab)
+        string(at.value, strtab)
     else
         error("Not a string attribute")
     end
@@ -73,7 +73,7 @@ immutable StrTableReference
     offset::UInt64
 end
 StrTableReference(::Void) = nothing
-Base.bytestring(ref::StrTableReference, strtab) = strtab_lookup(strtab, ref.offset)
+Base.string(ref::StrTableReference, strtab) = strtab_lookup(strtab, ref.offset)
 
 function show(io::IO, x::StrTableReference)
     strtab = isa(io, IOContext) ? get(io, :strtab, nothing) : nothing

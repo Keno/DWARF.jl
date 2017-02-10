@@ -293,7 +293,8 @@ module DWARF
     immutable AbbrevTableSet
         entries::Array{AbbrevTableEntry,1}
     end
-    zero(::Type{AbbrevTableEntry}) = AbbrevTableEntry(0,0,UInt8(0),Array(AttributeSpecification,0))
+    zero(::Type{AbbrevTableEntry}) = AbbrevTableEntry(
+      0,0,UInt8(0),Array{AttributeSpecification}(0))
     const zero_entry = zero(AbbrevTableEntry)
 
     function readorskip

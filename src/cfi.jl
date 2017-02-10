@@ -8,7 +8,7 @@ using ObjFileBase: DebugSections, ObjectHandle, handle
 import Base: read, setindex!
 using Base: @pure
 function read_cstring(io)
-    a = Array(UInt8, 0)
+    a = Array{UInt8}(0)
     while (x = read(io, UInt8)) != 0
         push!(a, x)
     end
@@ -24,13 +24,13 @@ immutable FDERef{SR<:SectionRef}
     offset::UInt
     # Distinguish between FDEs in eh_frame (true) or debug_frame
     is_eh_not_debug::Bool
-    ptrT::Union{Type{UInt32},Type{UInt64}}
+    ptrT::Type{T} where T<:Union{UInt32, UInt64}
 end
 
 immutable CIERef{SR<:SectionRef}
     eh_frame::SR
     offset::UInt
-    ptrT::Union{Type{UInt32},Type{UInt64}}
+    ptrT::Type{T} where T<:Union{UInt32, UInt64}
 end
 
 
@@ -199,7 +199,7 @@ immutable Expr
     opcodes :: Vector{UInt8}
     is_val :: Bool
 end
-const ExprNone = Expr(Array(UInt8, 0), false)
+const ExprNone = Expr(Array{UInt8}(0), false)
 module Flag
 const Undef = 0
 const Same = 1
@@ -238,15 +238,16 @@ end
 isundef(r::RegState) = r.flag == Flag.Undef
 issame(r::RegState) = r.flag == Flag.Same
 isdwarfexpr(r::RegState) = r.flag == Flag.DwarfExpr
+const StackT = Tuple{Dict{Int,RegState},Dict{Int,Expr},RegState,Expr}
 type RegStates
     values :: Dict{Int,RegState}
     values_expr :: Dict{Int,Expr}
-    stack :: Vector{Tuple{Dict{Int,RegState},Dict{Int,Expr},RegState,Expr}}
+    stack :: Vector{StackT}
     cfa :: RegState
     cfa_expr :: Expr
     delta :: Int
 end
-RegStates() = RegStates(Dict{Int,RegState}(), Dict{Int,Expr}(), Array(Tuple{Dict{Int,RegState},Dict{Int,Expr},RegState,Expr}, 0), Undef(), ExprNone, 0)
+RegStates() = RegStates(Dict{Int,RegState}(), Dict{Int,Expr}(), Array{StackT}(0), Undef(), ExprNone, 0)
 Base.copy(s::RegStates) = RegStates(copy(s.values),copy(s.values_expr),copy(s.stack),s.cfa,s.cfa_expr,s.delta)
 
 Base.getindex(s :: RegStates, n) = get(s.values, n, Undef())
